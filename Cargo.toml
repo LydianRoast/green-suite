@@ -1,0 +1,36 @@
+[package]
+name = "green-suite"
+version = "0.1.0"
+edition = "2024"
+authors = ["Kevin R. Whiteman"]
+description = "Local USB measurement explorer and mechanical blueprint workspace"
+license-file = "LICENSE"
+publish = false
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+csv = "1"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+hayro = "0.8"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serialport = { version = "4", default-features = false }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
+
+[profile.dev]
+debug = 0
+incremental = false
+opt-level = 1
+
+[profile.test]
+debug = 0
+incremental = false
+opt-level = 1

@@ -1,0 +1,13 @@
+/target/
+/workspace/
+/captures/
+/Green Suite.exe
+/Green Suite.lnk
+*.green-suite.json
+*.raw.ndjson
+*.pdf
+*.csv
+*.log
+/.venv/
+/.build-tmp/*
+!/.build-tmp/.gitkeep

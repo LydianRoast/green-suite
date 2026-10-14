@@ -1,0 +1,7 @@
+[build]
+jobs = 2
+
+[env]
+# Keep compiler and linker temporary files in the project workspace.
+TEMP = { value = ".build-tmp", relative = true, force = true }
+TMP = { value = ".build-tmp", relative = true, force = true }

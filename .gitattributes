@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.ttf binary
+# Preserve the original whitespace in upstream license texts.
+THIRD_PARTY_LICENSES.txt -whitespace
+assets/fonts/OFL-SourceSerif4.md -whitespace
