@@ -23,9 +23,13 @@ A measurement workspace for mechanical test and balance work.
 
 ## Interface
 
-The interface provides Dark and Light palettes, keyboard focus, scrollable
-details, and direct access to drawings and readings. The header and traverse
-diagram adapt to smaller windows. Measurement displays retain recorded numeric
+The interface provides Evergreen and Urbane palettes, each with Dark and Light
+modes. The palette and mode are remembered between launches. Bold serif type,
+ruled panels, and an original instrument engraving give the workspace a
+Frasurbane treatment. See [Interface design](DESIGN.md) for color sources.
+Keyboard focus, scrollable details, and direct access to drawings and readings
+remain available. The header and traverse diagram adapt to smaller windows.
+Measurement displays retain recorded numeric
 precision, and incomplete USB downloads remain clearly identified.
 
 ## Run and build
@@ -91,6 +95,17 @@ record reads are not blindly retried, because doing so could skip records.
 An interrupted transfer retains partial data and reports incompleteness.
 Unknown fields and unverified checksums are surfaced in warnings, and raw
 packets are preserved for investigation. No wireless support is implemented.
+
+The current pipeline is stored memory → USB queries → Rust decoding → raw
+capture and normalized measurements → reading explorer and drawing attachments.
+The GUI does not currently show live sensor readings. Evergreen documents a
+separate USB real-time logging capability for the WR-401 in its
+[User Guide, page 19](https://img1.wsimg.com/blobby/go/a3cb8563-340e-41b0-af11-2e1965d0fece/downloads/Wrist%20Reporter%20User%20Guide.pdf?ver=1733769186267#page=19).
+Live support requires verification of the stream handshake, packet format,
+timing, and stop behavior with an active sensor. The planned GUI path is a
+dedicated serial worker feeding timestamped readings, stale/disconnected
+indicators, bounded trends, and explicit capture into the project. Stored-record
+decoding alone does not establish live-stream compatibility.
 
 ## Traverse interpretation
 

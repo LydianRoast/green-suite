@@ -10,6 +10,7 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 #[derive(Clone, Copy)]
 struct Palette {
     green: Color32,
+    secondary: Color32,
     ink: Color32,
     muted: Color32,
     border: Color32,
@@ -18,6 +19,7 @@ struct Palette {
     duct: Color32,
     grid: Color32,
     warning: Color32,
+    warning_background: Color32,
     error: Color32,
     particle: Color32,
     point_text: Color32,
@@ -27,40 +29,24 @@ struct Palette {
 
 impl Palette {
     fn for_ui(ui: &egui::Ui) -> Self {
-        if ui.visuals().dark_mode {
-            Self {
-                green: Color32::from_rgb(132, 218, 161),
-                ink: Color32::from_rgb(235, 241, 226),
-                muted: Color32::from_rgb(179, 196, 182),
-                border: Color32::from_rgb(72, 94, 81),
-                panel: Color32::from_rgb(29, 46, 38),
-                canvas: Color32::from_rgb(24, 35, 30),
-                duct: Color32::from_rgb(19, 30, 23),
-                grid: Color32::from_rgb(83, 114, 92),
-                warning: Color32::from_rgb(65, 48, 23),
-                error: Color32::from_rgb(255, 160, 138),
-                particle: Color32::from_rgba_unmultiplied(212, 243, 188, 100),
-                point_text: Color32::from_rgb(15, 39, 23),
-                heat_low: Color32::from_rgb(34, 60, 42),
-                heat_high: Color32::from_rgb(57, 127, 78),
-            }
-        } else {
-            Self {
-                green: Color32::from_rgb(20, 115, 86),
-                ink: Color32::from_rgb(28, 54, 48),
-                muted: Color32::from_rgb(85, 107, 97),
-                border: Color32::from_rgb(199, 215, 204),
-                panel: Color32::from_rgb(235, 244, 237),
-                canvas: Color32::from_rgb(244, 248, 244),
-                duct: Color32::from_rgb(249, 251, 247),
-                grid: Color32::from_rgb(190, 211, 197),
-                warning: Color32::from_rgb(255, 242, 216),
-                error: Color32::from_rgb(170, 61, 45),
-                particle: Color32::from_rgba_unmultiplied(22, 90, 67, 75),
-                point_text: Color32::WHITE,
-                heat_low: Color32::from_rgb(225, 238, 220),
-                heat_high: Color32::from_rgb(100, 190, 145),
-            }
+        let colors = crate::appearance::palette(ui.ctx());
+        Self {
+            green: colors.green,
+            secondary: colors.secondary,
+            ink: colors.ink,
+            muted: colors.muted,
+            border: colors.line,
+            panel: colors.panel,
+            canvas: colors.canvas,
+            duct: colors.paper,
+            grid: colors.grid,
+            warning: colors.warning,
+            warning_background: colors.alternate,
+            error: ui.visuals().error_fg_color,
+            particle: colors.ink,
+            point_text: colors.paper,
+            heat_low: colors.heat_low,
+            heat_high: colors.heat_high,
         }
     }
 }
@@ -336,7 +322,7 @@ impl TraverseView {
         match calculate(traverse) {
             Ok(result) => {
                 egui::Frame::new().fill(colors.panel)
-                    .corner_radius(10.0).inner_margin(10.0).show(ui, |ui| {
+                    .corner_radius(2.0).inner_margin(10.0).show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             metric(ui, "DUCT AREA", format!("{:.3} ft²", result.area_sq_ft));
                             ui.separator();
@@ -362,7 +348,7 @@ impl TraverseView {
     fn configuration(&mut self, ui: &mut egui::Ui, traverse: &mut Traverse) -> bool {
         let mut changed = false;
         let colors = Palette::for_ui(ui);
-        egui::Frame::new().stroke(Stroke::new(1.0, colors.border)).corner_radius(10.0)
+        egui::Frame::new().stroke(Stroke::new(1.0, colors.border)).corner_radius(2.0)
             .inner_margin(14.0).show(ui, |ui| {
                 ui.strong("Sampling configuration");
                 ui.label(egui::RichText::new("EQUAL-AREA SAMPLING").small().strong().color(colors.green));
@@ -421,7 +407,7 @@ impl TraverseView {
             });
         if let Some(layout) = self.pending_layout.clone() {
             ui.add_space(6.0);
-            egui::Frame::new().fill(colors.warning).inner_margin(10.0).corner_radius(6.0).show(ui, |ui| {
+            egui::Frame::new().fill(colors.warning_background).stroke(Stroke::new(1.0, colors.warning)).inner_margin(10.0).corner_radius(2.0).show(ui, |ui| {
                 ui.label("Applying this layout clears the existing velocities because the sampling positions change.");
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Clear samples and apply").clicked() {
@@ -496,7 +482,7 @@ impl TraverseView {
             .wrap_mode(egui::TextWrapMode::Truncate)
             .selected_text(
                 selected_reading
-                    .map(|reading| reading_label(reading))
+                    .map(reading_label)
                     .unwrap_or_else(|| "Choose a velocity reading".into()),
             )
             .show_ui(ui, |ui| {
@@ -723,7 +709,7 @@ impl TraverseView {
             Sense::click(),
         );
         let canvas = response.rect;
-        painter.rect_filled(canvas, 10.0, colors.canvas);
+        painter.rect_filled(canvas, 2.0, colors.canvas);
         let inner = canvas.shrink2(Vec2::new(38.0, 34.0));
         let is_circular = circular(&traverse.shape);
         let ratio = if is_circular {
@@ -770,7 +756,7 @@ impl TraverseView {
                 let end_x = (point.x + 8.0).min(duct.right());
                 painter.line_segment(
                     [point, Pos2::new(end_x, point.y)],
-                    Stroke::new(1.6, colors.particle),
+                    Stroke::new(1.0, colors.particle),
                 );
             }
         }
@@ -817,7 +803,7 @@ impl TraverseView {
                 .flatten()
                 .filter(|value| value.is_finite() && *value >= 0.0);
             if self.selected == index {
-                painter.circle_stroke(point, radius + 4.0, Stroke::new(2.5, colors.green));
+                painter.circle_stroke(point, radius + 4.0, Stroke::new(2.5, colors.secondary));
             }
             painter.circle_filled(
                 point,

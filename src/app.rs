@@ -1,5 +1,9 @@
 // Copyright (c) 2026 Kevin R. Whiteman. All rights reserved.
-use crate::{model::*, pdf, traverse, usb};
+use crate::{
+    appearance::{self, Scheme, palette},
+    model::*,
+    pdf, traverse, usb,
+};
 use eframe::egui::{self, *};
 use std::{
     path::PathBuf,
@@ -7,67 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-const GREEN: Color32 = Color32::from_rgb(19, 119, 93);
-const INK: Color32 = Color32::from_rgb(28, 46, 51);
-const MUTED: Color32 = Color32::from_rgb(99, 116, 119);
-const LINE: Color32 = Color32::from_rgb(218, 227, 224);
-const PAPER: Color32 = Color32::from_rgb(247, 249, 247);
-
-#[derive(Clone, Copy)]
-struct Palette {
-    green: Color32,
-    ink: Color32,
-    muted: Color32,
-    line: Color32,
-    paper: Color32,
-    panel: Color32,
-    action: Color32,
-    selection: Color32,
-    alternate: Color32,
-    canvas: Color32,
-    grid: Color32,
-    warning: Color32,
-}
-
-impl Palette {
-    fn new(dark: bool) -> Self {
-        if dark {
-            Self {
-                green: Color32::from_rgb(132, 218, 178),
-                ink: Color32::from_rgb(238, 234, 221),
-                muted: Color32::from_rgb(174, 191, 179),
-                line: Color32::from_rgb(68, 87, 75),
-                paper: Color32::from_rgb(23, 31, 27),
-                panel: Color32::from_rgb(31, 41, 35),
-                action: GREEN,
-                selection: Color32::from_rgb(49, 83, 63),
-                alternate: Color32::from_rgb(35, 48, 40),
-                canvas: Color32::from_rgb(17, 25, 21),
-                grid: Color32::from_rgb(43, 58, 48),
-                warning: Color32::from_rgb(242, 182, 111),
-            }
-        } else {
-            Self {
-                green: GREEN,
-                ink: INK,
-                muted: MUTED,
-                line: LINE,
-                paper: PAPER,
-                panel: Color32::from_rgb(255, 254, 249),
-                action: GREEN,
-                selection: Color32::from_rgb(216, 237, 227),
-                alternate: Color32::from_rgb(246, 249, 244),
-                canvas: Color32::from_rgb(230, 237, 233),
-                grid: Color32::from_rgb(203, 214, 207),
-                warning: Color32::from_rgb(160, 95, 28),
-            }
-        }
-    }
-}
-
-fn palette(ctx: &Context) -> Palette {
-    Palette::new(ctx.style().visuals.dark_mode)
-}
+// Drawing annotations remain legible against unmodified white PDF sheets.
+const GREEN: Color32 = Color32::from_rgb(1, 97, 59);
+const INK: Color32 = Color32::from_rgb(15, 23, 40);
+const MUTED: Color32 = Color32::from_rgb(81, 86, 90);
 
 #[derive(Clone, Copy, PartialEq)]
 enum View {
@@ -126,6 +73,7 @@ pub struct GreenSuite {
     status_details: Option<String>,
     source_details: Option<Reading>,
     dark_mode: bool,
+    scheme: Scheme,
 }
 
 impl GreenSuite {
@@ -138,8 +86,11 @@ impl GreenSuite {
     ) -> Self {
         let dark_mode = std::fs::read_to_string(data_dir().join("appearance.txt"))
             .is_ok_and(|value| value.trim() == "dark");
+        let scheme = std::fs::read_to_string(data_dir().join("palette.txt"))
+            .map(|value| Scheme::from_key(&value))
+            .unwrap_or_default();
         configure_fonts(&cc.egui_ctx);
-        theme(&cc.egui_ctx, dark_mode);
+        appearance::apply(&cc.egui_ctx, dark_mode, scheme);
         let (tx, rx) = mpsc::channel();
         let remembered = std::fs::read_to_string(data_dir().join("last-project.txt"))
             .ok()
@@ -216,6 +167,7 @@ impl GreenSuite {
             status_details: None,
             source_details: None,
             dark_mode,
+            scheme,
         };
         if demo {
             app.selected_point = app.project.points.first().map(|p| p.id.clone());
@@ -470,69 +422,51 @@ impl GreenSuite {
             }
         }
     }
+    fn persist_appearance(&mut self, ctx: &Context) {
+        appearance::apply(ctx, self.dark_mode, self.scheme);
+        let result = std::fs::create_dir_all(data_dir()).and_then(|()| {
+            std::fs::write(
+                data_dir().join("appearance.txt"),
+                if self.dark_mode { "dark" } else { "light" },
+            )?;
+            std::fs::write(data_dir().join("palette.txt"), self.scheme.key())
+        });
+        if let Err(error) = result {
+            self.message(
+                format!("Appearance applied, but could not save the preference: {error}"),
+                true,
+            );
+        }
+    }
     fn header(&mut self, ctx: &Context) {
         let colors = palette(ctx);
         TopBottomPanel::top("header")
-            .exact_height(70.)
+            .exact_height(104.)
             .frame(
                 Frame::new()
                     .fill(colors.panel)
-                    .inner_margin(Margin::symmetric(22, 12)),
+                    .inner_margin(Margin::symmetric(22, 6)),
             )
             .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 3.;
                 let compact = ui.available_width() < 1120.;
                 ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(34., 34.), Sense::hover());
-                    ui.painter().rect_filled(r, 9, colors.action);
-                    for (x, y) in [(0.3, 0.3), (0.7, 0.3), (0.5, 0.7)] {
-                        ui.painter().circle_filled(
-                            pos2(r.left() + r.width() * x, r.top() + r.height() * y),
-                            3.,
-                            Color32::WHITE,
-                        );
-                    }
+                    let (mark, _) = ui.allocate_exact_size(vec2(44., 44.), Sense::hover());
+                    instrument_mark(ui.painter(), mark, colors.brand, colors.ink);
+                    ui.add_space(3.);
                     ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = -3.;
                         ui.label(
-                            RichText::new("GREEN SUITE")
-                                .font(serif_bold(21.))
+                            RichText::new("Green Suite")
+                                .font(serif_bold(32.))
                                 .color(colors.ink),
                         );
                         ui.label(
-                            RichText::new("MEASUREMENT WORKSPACE")
-                                .size(11.)
+                            RichText::new("F I E L D   M E A S U R E M E N T")
+                                .size(10.)
                                 .color(colors.muted),
                         );
                     });
-                    ui.add_space(if compact { 10. } else { 30. });
-                    for (v, label) in [
-                        (
-                            View::Blueprint,
-                            if compact {
-                                "Blueprint"
-                            } else {
-                                "Blueprint map"
-                            },
-                        ),
-                        (
-                            View::Readings,
-                            if compact {
-                                "Readings"
-                            } else {
-                                "Reading explorer"
-                            },
-                        ),
-                        (
-                            View::Traverse,
-                            if compact { "Traverse" } else { "Traverse lab" },
-                        ),
-                    ] {
-                        if ui
-                            .selectable_label(self.view == v, RichText::new(label).size(14.))
-                            .clicked()
-                        {
-                            self.view = v;
-                        }
-                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("About").clicked() {
                             self.show_about = true;
@@ -546,40 +480,94 @@ impl GreenSuite {
                             .clicked()
                         {
                             self.dark_mode = !self.dark_mode;
-                            theme(ctx, self.dark_mode);
-                            let _ = std::fs::create_dir_all(data_dir());
-                            let _ = std::fs::write(
-                                data_dir().join("appearance.txt"),
-                                if self.dark_mode { "dark" } else { "light" },
+                            self.persist_appearance(ctx);
+                        }
+                        let before = self.scheme;
+                        ui.menu_button(format!("{} palette", self.scheme.label()), |ui| {
+                            ui.label(
+                                RichText::new("COLOR PALETTE")
+                                    .font(serif_bold(11.))
+                                    .color(colors.muted),
                             );
+                            for scheme in [Scheme::Evergreen, Scheme::Urbane] {
+                                if ui
+                                    .selectable_value(&mut self.scheme, scheme, scheme.label())
+                                    .clicked()
+                                {
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if before != self.scheme {
+                            self.persist_appearance(ctx);
                         }
                         if ui
-                            .button(if compact { "Save" } else { "Save project" })
+                            .button("Save project")
                             .on_hover_text("Save project · Ctrl+S")
                             .clicked()
                         {
                             self.save();
                         }
-                        let contains_examples = self.demo
-                            || self.project.readings.iter().any(|r| r.source == "example")
-                            || self.project.documents.iter().any(|d| d.path.is_empty());
-                        if !compact || contains_examples {
-                            ui.label(
-                                RichText::new(if contains_examples {
-                                    if compact { "EXAMPLE" } else { "EXAMPLE DATA" }
-                                } else {
-                                    "LOCAL · USB ONLY"
-                                })
-                                .size(11.)
-                                .color(if contains_examples {
-                                    colors.warning
-                                } else {
-                                    colors.green
-                                }),
-                            );
-                        }
                     });
                 });
+                let (rule, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 5.), Sense::hover());
+                ui.painter().hline(
+                    rule.x_range(),
+                    rule.center().y,
+                    Stroke::new(1., colors.line),
+                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = if compact { 12. } else { 24. };
+                    for (view, label) in [
+                        (View::Blueprint, "01   Blueprint map"),
+                        (View::Readings, "02   Reading explorer"),
+                        (View::Traverse, "03   Traverse lab"),
+                    ] {
+                        let selected = self.view == view;
+                        let response = ui.add(
+                            Button::selectable(
+                                selected,
+                                RichText::new(label).font(serif_bold(14.)),
+                            )
+                            .min_size(vec2(0., 27.)),
+                        );
+                        if selected {
+                            ui.painter().hline(
+                                response.rect.x_range(),
+                                response.rect.bottom() - 1.,
+                                Stroke::new(2., colors.green),
+                            );
+                        }
+                        if response.clicked() {
+                            self.view = view;
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let examples = self.demo
+                            || self.project.readings.iter().any(|r| r.source == "example")
+                            || self.project.documents.iter().any(|d| d.path.is_empty());
+                        ui.label(
+                            RichText::new(if examples {
+                                "EXAMPLE DATA"
+                            } else {
+                                "LOCAL WORKSPACE"
+                            })
+                            .font(serif_bold(11.))
+                            .color(if examples {
+                                colors.warning
+                            } else {
+                                colors.muted
+                            }),
+                        );
+                    });
+                });
+                let rect = ui.max_rect();
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.bottom() + 3.,
+                    Stroke::new(1., colors.line),
+                );
             });
     }
     fn sidebar(&mut self, ctx: &Context) {
@@ -625,12 +613,11 @@ impl GreenSuite {
                                     if let Some(path) = rfd::FileDialog::new()
                                         .add_filter("Green Suite project", &["json"])
                                         .pick_file()
+                                        && self.save()
                                     {
-                                        if self.save() {
-                                            match Project::load(&path) {
-                                                Ok(p) => self.replace_project(p, path, false, ctx),
-                                                Err(e) => self.message(e.to_string(), true),
-                                            }
+                                        match Project::load(&path) {
+                                            Ok(p) => self.replace_project(p, path, false, ctx),
+                                            Err(e) => self.message(e.to_string(), true),
                                         }
                                     }
                                 }
@@ -645,6 +632,19 @@ impl GreenSuite {
                                         self.save();
                                     }
                                 }
+                                ui.separator();
+                                if ui
+                                    .add_enabled(!self.busy, Button::new("Open example project"))
+                                    .clicked()
+                                    && self.save()
+                                {
+                                    let p = example_project();
+                                    let path = default_path(&p);
+                                    self.replace_project(p, path, true, ctx);
+                                    self.selected_point =
+                                        self.project.points.first().map(|p| p.id.clone());
+                                    ui.close();
+                                }
                             });
                         });
                         ui.add_space(6.);
@@ -657,13 +657,11 @@ impl GreenSuite {
                                     .min_size(vec2(ui.available_width(), 32.)),
                             )
                             .clicked()
-                        {
-                            if let Some(path) = rfd::FileDialog::new()
+                            && let Some(path) = rfd::FileDialog::new()
                                 .add_filter("Mechanical blueprint", &["pdf"])
                                 .pick_file()
-                            {
-                                self.import_pdf(path, ctx);
-                            }
+                        {
+                            self.import_pdf(path, ctx);
                         }
                         ui.horizontal(|ui| {
                             ui.selectable_value(
@@ -749,12 +747,11 @@ impl GreenSuite {
                                 self.view = View::Blueprint;
                                 if let Some(i) =
                                     self.project.documents.iter().position(|d| d.id == doc)
+                                    && (i != self.document || page != self.page)
                                 {
-                                    if i != self.document || page != self.page {
-                                        self.document = i;
-                                        self.page = page;
-                                        self.request_page(ctx);
-                                    }
+                                    self.document = i;
+                                    self.page = page;
+                                    self.request_page(ctx);
                                 }
                             }
                             if self.project.points.is_empty() {
@@ -771,7 +768,7 @@ impl GreenSuite {
                 ui.add_space(6.);
                 ui.separator();
                 ui.add_space(6.);
-                eyebrow(ui, "USB INSTRUMENT");
+                eyebrow(ui, "USB · STORED RECORDS");
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(!self.busy, |ui| {
                         ComboBox::from_id_salt("ports")
@@ -804,7 +801,7 @@ impl GreenSuite {
                 });
                 if let Some(d) = &self.device {
                     ui.label(
-                        RichText::new(format!("Connected · {}", d.model))
+                        RichText::new(format!("Identified · {}", d.model))
                             .color(colors.green)
                             .strong(),
                     );
@@ -845,17 +842,6 @@ impl GreenSuite {
                         .size(11.)
                         .color(colors.muted),
                 );
-                ui.add_space(4.);
-                if ui
-                    .add_enabled(!self.busy, Button::new("Open example project").small())
-                    .clicked()
-                    && self.save()
-                {
-                    let p = example_project();
-                    let path = default_path(&p);
-                    self.replace_project(p, path, true, ctx);
-                    self.selected_point = self.project.points.first().map(|p| p.id.clone());
-                }
             });
     }
     fn inspector(&mut self, ctx: &Context) {
@@ -878,7 +864,7 @@ impl GreenSuite {
             ui.add_space(16.);ui.separator();ui.add_space(12.);eyebrow(ui,"ATTACHED MEASUREMENTS");
             let mut remove=None;
             ScrollArea::vertical().id_salt("attached").max_height(230.).show(ui,|ui|{for id in &ids{if let Some(r)=self.project.readings.iter().find(|r|&r.id==id){
-                Frame::new().fill(colors.paper).corner_radius(6).inner_margin(9).show(ui,|ui|{ui.horizontal(|ui|{let value=format!("{} {}",r.value,r.unit);ui.add(Label::new(RichText::new(&value).size(20.).strong().color(colors.green)).truncate()).on_hover_text(&value);if ui.small_button("×").on_hover_text("Detach reading").clicked(){remove=Some(id.clone());}});ui.label(RichText::new(format!("{} · {}",r.kind,r.group)).size(11.).color(colors.muted));ui.label(RichText::new(&r.timestamp).size(11.).color(colors.muted));if design>0.&&r.unit.eq_ignore_ascii_case(&unit){ui.label(format!("{:.1}% of design",r.value/design*100.));}});ui.add_space(6.);
+                Frame::new().fill(colors.paper).corner_radius(1).inner_margin(9).show(ui,|ui|{ui.horizontal(|ui|{let value=format!("{} {}",r.value,r.unit);ui.add(Label::new(RichText::new(&value).size(20.).strong().color(colors.green)).truncate()).on_hover_text(&value);if ui.small_button("×").on_hover_text("Detach reading").clicked(){remove=Some(id.clone());}});ui.label(RichText::new(format!("{} · {}",r.kind,r.group)).size(11.).color(colors.muted));ui.label(RichText::new(&r.timestamp).size(11.).color(colors.muted));if design>0.&&r.unit.eq_ignore_ascii_case(&unit){ui.label(format!("{:.1}% of design",r.value/design*100.));}});ui.add_space(6.);
             }}});
             if let Some(id)=remove{self.project.points[index].reading_ids.retain(|i|i!=&id);dirty=true;}
             if ids.is_empty(){ui.label(RichText::new("No measurements attached.").color(colors.muted));}
@@ -901,7 +887,7 @@ impl GreenSuite {
                     }
                 });
             });
-            if ui.add_enabled(self.selected_reading.is_some(),Button::new("Attach selected reading").min_size(vec2(ui.available_width(),30.))).clicked(){if let Some(id)=&self.selected_reading{if !self.project.points[index].reading_ids.contains(id){self.project.points[index].reading_ids.push(id.clone());dirty=true;}}}
+            if ui.add_enabled(self.selected_reading.is_some(),Button::new("Attach selected reading").min_size(vec2(ui.available_width(),30.))).clicked()&& let Some(id)=&self.selected_reading&& !self.project.points[index].reading_ids.contains(id){self.project.points[index].reading_ids.push(id.clone());dirty=true;}
             ui.add_space(12.);ui.collapsing("Enter a manual measurement",|ui|{ui.add(DragValue::new(&mut self.manual_value).speed(1.));ui.label(format!("Unit: {}",self.project.points[index].unit));if ui.button("Record and attach").clicked(){let p=&mut self.project.points[index];let id=uuid::Uuid::new_v4().to_string();self.project.readings.push(Reading{id:id.clone(),timestamp:chrono::Local::now().to_rfc3339(),group:p.label.clone(),sensor:"Manual entry".into(),kind:p.kind.clone(),value:self.manual_value,unit:p.unit.clone(),source:"manual".into(),raw:String::new()});p.reading_ids.push(id);dirty=true;}});
             ui.add_space(15.);if ui.small_button("Delete mapped device…").clicked(){self.confirm_delete=Some(self.project.points[index].id.clone());}
             if dirty{self.changed();}
@@ -925,9 +911,64 @@ impl GreenSuite {
         });
         ui.add_space(10.);
         if self.project.documents.is_empty() {
-            Frame::new().fill(colors.panel).stroke(Stroke::new(1.,colors.line)).corner_radius(12).inner_margin(40).show(ui,|ui|{
-                ui.set_min_height((ui.available_height()-100.).max(250.));ui.vertical_centered(|ui|{ui.add_space(65.);ui.label(RichText::new("Start with the drawing.").size(31.).strong().color(colors.ink));ui.add_space(14.);ui.label(RichText::new("Import a mechanical blueprint and put each measurement where it belongs.").size(15.).color(colors.muted));ui.add_space(25.);if ui.add_enabled(!self.busy,Button::new(RichText::new("Import PDF blueprint").color(Color32::WHITE)).fill(colors.action).min_size(vec2(210.,45.))).clicked(){if let Some(path)=rfd::FileDialog::new().add_filter("PDF blueprint",&["pdf"]).pick_file(){self.import_pdf(path,ctx);}}ui.add_space(24.);ui.label("Air devices     ·     Duct traverses     ·     Hydronic valves     ·     Pipe measurements");ui.add_space(40.);ui.label(RichText::new("PDFs, device data, and project files stay on this computer.").size(12.).color(colors.muted));});
-            });
+            ScrollArea::vertical()
+                .id_salt("drawing-welcome")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    Frame::new()
+                        .fill(colors.panel)
+                        .stroke(Stroke::new(1., colors.line))
+                        .corner_radius(1)
+                        .inner_margin(24)
+                        .show(ui, |ui| {
+                            ui.set_min_width((ui.available_width() - 1.).max(0.));
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(12.);
+                                let (mark, _) =
+                                    ui.allocate_exact_size(vec2(74., 74.), Sense::hover());
+                                instrument_mark(ui.painter(), mark, colors.brand, colors.ink);
+                                ui.add_space(14.);
+                                ui.label(
+                                    RichText::new("Start with the drawing.")
+                                        .font(serif_bold(28.))
+                                        .color(colors.ink),
+                                );
+                                ui.add_space(10.);
+                                ui.label(
+                                    RichText::new("A place for every measurement.")
+                                        .size(16.)
+                                        .italics()
+                                        .color(colors.secondary),
+                                );
+                                ui.add_space(20.);
+                                if ui
+                                    .add_enabled(
+                                        !self.busy,
+                                        Button::new(
+                                            RichText::new("Import PDF blueprint")
+                                                .color(Color32::WHITE),
+                                        )
+                                        .fill(colors.action)
+                                        .min_size(vec2(210., 40.)),
+                                    )
+                                    .clicked()
+                                    && let Some(path) = rfd::FileDialog::new()
+                                        .add_filter("PDF blueprint", &["pdf"])
+                                        .pick_file()
+                                {
+                                    self.import_pdf(path, ctx);
+                                }
+                                ui.add_space(20.);
+                                ui.label(
+                                    RichText::new(
+                                        "Import a drawing. Place devices. Attach readings.",
+                                    )
+                                    .color(colors.muted),
+                                );
+                                ui.add_space(12.);
+                            });
+                        });
+                });
             return;
         }
         let doc = self.project.documents[self.document].clone();
@@ -996,7 +1037,8 @@ impl GreenSuite {
         );
         let (canvas, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let painter = ui.painter_at(canvas);
-        painter.rect_filled(canvas, 8, colors.canvas);
+        painter.rect_filled(canvas, 1, colors.canvas);
+        painter.rect_stroke(canvas, 1, Stroke::new(1., colors.line), StrokeKind::Inside);
         for x in (0..(canvas.width() / 24.) as i32).map(|i| canvas.left() + i as f32 * 24.) {
             for y in (0..(canvas.height() / 24.) as i32).map(|i| canvas.top() + i as f32 * 24.) {
                 painter.circle_filled(pos2(x, y), 0.8, colors.grid);
@@ -1099,12 +1141,12 @@ impl GreenSuite {
         }
         if drawing_ready && response.dragged() {
             if let Some(id) = &self.dragging_point {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    if let Some(p) = self.project.points.iter_mut().find(|p| &p.id == id) {
-                        p.x = ((pos.x - sheet.left()) / sheet.width()).clamp(0., 1.);
-                        p.y = ((pos.y - sheet.top()) / sheet.height()).clamp(0., 1.);
-                        self.dirty = true;
-                    }
+                if let Some(pos) = response.interact_pointer_pos()
+                    && let Some(p) = self.project.points.iter_mut().find(|p| &p.id == id)
+                {
+                    p.x = ((pos.x - sheet.left()) / sheet.width()).clamp(0., 1.);
+                    p.y = ((pos.y - sheet.top()) / sheet.height()).clamp(0., 1.);
+                    self.dirty = true;
                 }
             } else if !self.add_point {
                 self.pan += ui.input(|i| i.pointer.delta());
@@ -1116,44 +1158,44 @@ impl GreenSuite {
         if response.clicked() {
             if let Some(id) = hit {
                 self.selected_point = Some(id);
-            } else if self.add_point && drawing_ready {
-                if let Some(pos) = response
+            } else if self.add_point
+                && drawing_ready
+                && let Some(pos) = response
                     .interact_pointer_pos()
                     .filter(|p| sheet.contains(*p))
-                {
-                    let id = uuid::Uuid::new_v4().to_string();
-                    let prefix = if self.point_kind.contains("Valve") {
-                        "V"
-                    } else if self.point_kind.contains("Pipe") {
-                        "P"
-                    } else if self.point_kind.to_ascii_lowercase().contains("traverse") {
-                        "TR"
+            {
+                let id = uuid::Uuid::new_v4().to_string();
+                let prefix = if self.point_kind.contains("Valve") {
+                    "V"
+                } else if self.point_kind.contains("Pipe") {
+                    "P"
+                } else if self.point_kind.to_ascii_lowercase().contains("traverse") {
+                    "TR"
+                } else {
+                    "AD"
+                };
+                self.project.points.push(MapPoint {
+                    id: id.clone(),
+                    label: format!("{prefix}-{:02}", self.project.points.len() + 1),
+                    kind: self.point_kind.clone(),
+                    system: String::new(),
+                    document_id: doc.id.clone(),
+                    page: self.page,
+                    x: (pos.x - sheet.left()) / sheet.width(),
+                    y: (pos.y - sheet.top()) / sheet.height(),
+                    design_value: 0.,
+                    unit: if prefix == "V" || prefix == "P" {
+                        "GPM"
                     } else {
-                        "AD"
-                    };
-                    self.project.points.push(MapPoint {
-                        id: id.clone(),
-                        label: format!("{prefix}-{:02}", self.project.points.len() + 1),
-                        kind: self.point_kind.clone(),
-                        system: String::new(),
-                        document_id: doc.id.clone(),
-                        page: self.page,
-                        x: (pos.x - sheet.left()) / sheet.width(),
-                        y: (pos.y - sheet.top()) / sheet.height(),
-                        design_value: 0.,
-                        unit: if prefix == "V" || prefix == "P" {
-                            "GPM"
-                        } else {
-                            "CFM"
-                        }
-                        .into(),
-                        notes: String::new(),
-                        reading_ids: vec![],
-                    });
-                    self.selected_point = Some(id);
-                    self.show_devices = true;
-                    self.changed();
-                }
+                        "CFM"
+                    }
+                    .into(),
+                    notes: String::new(),
+                    reading_ids: vec![],
+                });
+                self.selected_point = Some(id);
+                self.show_devices = true;
+                self.changed();
             }
         }
         ui.add_space(9.);
@@ -1187,29 +1229,27 @@ impl GreenSuite {
         ui.horizontal(|ui| {
             ui.heading("Reading explorer");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Export CSV…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if ui.button("Export CSV…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .set_file_name("Green Suite readings.csv")
                         .save_file()
-                    {
-                        match self.project.export_csv(&path) {
-                            Ok(()) => self.message("Measurements exported.", false),
-                            Err(e) => self.message(e.to_string(), true),
-                        }
+                {
+                    match self.project.export_csv(&path) {
+                        Ok(()) => self.message("Measurements exported.", false),
+                        Err(e) => self.message(e.to_string(), true),
                     }
                 }
-                if ui.button("Import CSV…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
+                if ui.button("Import CSV…").clicked()
+                    && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Measurements", &["csv"])
                         .pick_file()
-                    {
-                        match self.project.import_csv(&path) {
-                            Ok(n) => {
-                                self.changed();
-                                self.message(format!("Imported {n} measurements."), false)
-                            }
-                            Err(e) => self.message(e.to_string(), true),
+                {
+                    match self.project.import_csv(&path) {
+                        Ok(n) => {
+                            self.changed();
+                            self.message(format!("Imported {n} measurements."), false)
                         }
+                        Err(e) => self.message(e.to_string(), true),
                     }
                 }
             });
@@ -1291,7 +1331,7 @@ impl GreenSuite {
         Frame::new()
             .fill(colors.panel)
             .stroke(Stroke::new(1., colors.line))
-            .corner_radius(7)
+            .corner_radius(1)
             .inner_margin(12)
             .show(ui, |ui| {
                 if filtered.is_empty() {
@@ -1447,19 +1487,16 @@ impl GreenSuite {
                         )),
                     )
                     .clicked()
-                {
-                    if let Some(p) = self
+                    && let Some(p) = self
                         .project
                         .points
                         .iter_mut()
                         .find(|p| Some(&p.id) == self.selected_point.as_ref())
-                    {
-                        if !p.reading_ids.contains(&r.id) {
-                            p.reading_ids.push(r.id.clone());
-                            self.changed();
-                            self.message("Reading attached to mapped device.", false);
-                        }
-                    }
+                    && !p.reading_ids.contains(&r.id)
+                {
+                    p.reading_ids.push(r.id.clone());
+                    self.changed();
+                    self.message("Reading attached to mapped device.", false);
                 }
                 if ui.button("Source record…").clicked() {
                     self.source_details = Some(r.clone());
@@ -1523,36 +1560,35 @@ impl GreenSuite {
                     }
                 });
         });
-        if let Ok(result) = traverse::calculate(t) {
-            if ui
+        if let Ok(result) = traverse::calculate(t)
+            && ui
                 .add_enabled(
                     result.flow_cfm.is_some(),
                     Button::new("Save calculated flow as a reading"),
                 )
                 .clicked()
+        {
+            let id = uuid::Uuid::new_v4().to_string();
+            self.project.readings.push(Reading {
+                id: id.clone(),
+                timestamp: chrono::Local::now().to_rfc3339(),
+                group: t.name.clone(),
+                sensor: "Traverse calculation".into(),
+                kind: "Airflow".into(),
+                value: result.flow_cfm.unwrap(),
+                unit: "CFM".into(),
+                source: "traverse".into(),
+                raw: serde_json::to_string(t).unwrap_or_default(),
+            });
+            if let Some(p) = self
+                .project
+                .points
+                .iter_mut()
+                .find(|p| Some(&p.id) == t.point_id.as_ref())
             {
-                let id = uuid::Uuid::new_v4().to_string();
-                self.project.readings.push(Reading {
-                    id: id.clone(),
-                    timestamp: chrono::Local::now().to_rfc3339(),
-                    group: t.name.clone(),
-                    sensor: "Traverse calculation".into(),
-                    kind: "Airflow".into(),
-                    value: result.flow_cfm.unwrap(),
-                    unit: "CFM".into(),
-                    source: "traverse".into(),
-                    raw: serde_json::to_string(t).unwrap_or_default(),
-                });
-                if let Some(p) = self
-                    .project
-                    .points
-                    .iter_mut()
-                    .find(|p| Some(&p.id) == t.point_id.as_ref())
-                {
-                    p.reading_ids.push(id);
-                }
-                changed = true;
+                p.reading_ids.push(id);
             }
+            changed = true;
         }
         ui.add_space(8.);
         changed |= self.traverse_view.ui(ui, t, &self.project.readings);
@@ -1575,14 +1611,13 @@ impl eframe::App for GreenSuite {
             }
         }
         for file in ctx.input(|i| i.raw.dropped_files.clone()) {
-            if let Some(path) = file.path {
-                if path
+            if let Some(path) = file.path
+                && path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
-                {
-                    self.import_pdf(path, ctx);
-                    break;
-                }
+            {
+                self.import_pdf(path, ctx);
+                break;
             }
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::S)) {
@@ -1773,6 +1808,41 @@ fn serif_bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("Serif Bold".into()))
 }
 
+/// Original instrument engraving: concentric scales around a duct cross-section.
+fn instrument_mark(painter: &Painter, rect: Rect, brand: Color32, ink: Color32) {
+    let center = rect.center();
+    let radius = rect.width().min(rect.height()) * 0.43;
+    painter.circle_stroke(center, radius, Stroke::new(1.2, ink));
+    painter.circle_stroke(center, radius * 0.77, Stroke::new(0.7, brand));
+    for index in 0..24 {
+        let angle = index as f32 * std::f32::consts::TAU / 24.;
+        let direction = vec2(angle.cos(), angle.sin());
+        painter.line_segment(
+            [
+                center + direction * radius * 0.86,
+                center + direction * radius,
+            ],
+            Stroke::new(if index % 6 == 0 { 1.4 } else { 0.6 }, ink),
+        );
+    }
+    let inner = radius * 0.48;
+    painter.rect_stroke(
+        Rect::from_center_size(center, Vec2::splat(inner * 2.)),
+        0,
+        Stroke::new(1., ink),
+        StrokeKind::Inside,
+    );
+    painter.line_segment(
+        [center - vec2(inner, 0.), center + vec2(inner, 0.)],
+        Stroke::new(1., brand),
+    );
+    painter.line_segment(
+        [center - vec2(0., inner), center + vec2(0., inner)],
+        Stroke::new(1., brand),
+    );
+    painter.circle_filled(center, 2., brand);
+}
+
 fn configure_fonts(ctx: &Context) {
     let mut fonts = FontDefinitions::empty();
     fonts.font_data.insert(
@@ -1797,81 +1867,43 @@ fn configure_fonts(ctx: &Context) {
     ctx.set_fonts(fonts);
 }
 
-fn theme(ctx: &Context, dark: bool) {
-    ctx.set_theme(if dark {
-        ThemePreference::Dark
-    } else {
-        ThemePreference::Light
-    });
-    let colors = Palette::new(dark);
-    let mut style = (*ctx.style()).clone();
-    style.visuals = if dark {
-        Visuals::dark()
-    } else {
-        Visuals::light()
-    };
-    style.visuals.override_text_color = Some(colors.ink);
-    style.visuals.panel_fill = colors.panel;
-    style.visuals.window_fill = colors.panel;
-    style.visuals.extreme_bg_color = colors.paper;
-    style.visuals.faint_bg_color = colors.alternate;
-    style.visuals.selection.bg_fill = colors.selection;
-    style.visuals.selection.stroke = Stroke::new(1., colors.green);
-    for widget in [
-        &mut style.visuals.widgets.inactive,
-        &mut style.visuals.widgets.hovered,
-        &mut style.visuals.widgets.active,
-    ] {
-        widget.bg_fill = colors.alternate;
-        widget.weak_bg_fill = colors.alternate;
-        widget.bg_stroke = Stroke::new(1., colors.line);
-        widget.fg_stroke = Stroke::new(1.4, colors.ink);
-    }
-    style.visuals.widgets.hovered.bg_fill = colors.selection;
-    style.visuals.widgets.hovered.weak_bg_fill = colors.selection;
-    style.visuals.widgets.active.bg_fill = colors.selection;
-    style.visuals.widgets.active.weak_bg_fill = colors.selection;
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1., colors.line);
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1., colors.muted);
-    style.spacing.item_spacing = vec2(8., 8.);
-    style.spacing.button_padding = vec2(11., 7.);
-    style.spacing.scroll = style::ScrollStyle::solid();
-    style
-        .text_styles
-        .insert(TextStyle::Body, FontId::proportional(14.));
-    style.text_styles.insert(TextStyle::Button, serif_bold(13.));
-    style
-        .text_styles
-        .insert(TextStyle::Heading, serif_bold(24.));
-    style
-        .text_styles
-        .insert(TextStyle::Small, FontId::proportional(12.));
-    style
-        .text_styles
-        .insert(TextStyle::Monospace, FontId::proportional(12.));
-    ctx.set_style(style);
-}
 fn eyebrow(ui: &mut Ui, s: &str) {
     let colors = palette(ui.ctx());
-    ui.label(RichText::new(s).font(serif_bold(11.)).color(colors.muted));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(s).font(serif_bold(11.)).color(colors.muted));
+        let (rule, _) =
+            ui.allocate_exact_size(vec2(ui.available_width().max(0.), 10.), Sense::hover());
+        ui.painter().hline(
+            rule.x_range(),
+            rule.center().y,
+            Stroke::new(0.7, colors.line),
+        );
+    });
     ui.add_space(5.);
 }
 fn stat(ui: &mut Ui, label: &str, value: &str) {
     let colors = palette(ui.ctx());
-    Frame::new()
+    let card = Frame::new()
         .fill(colors.panel)
         .stroke(Stroke::new(1., colors.line))
-        .corner_radius(7)
+        .corner_radius(1)
         .inner_margin(16)
         .show(ui, |ui| {
-            ui.set_min_width(155.);
-            eyebrow(ui, label);
-            ui.label(
-                RichText::new(value)
-                    .font(serif_bold(30.))
-                    .color(colors.green),
-            );
+            ui.vertical(|ui| {
+                ui.set_width(155.);
+                eyebrow(ui, label);
+                ui.label(
+                    RichText::new(value)
+                        .font(serif_bold(30.))
+                        .color(colors.green),
+                );
+            });
         });
+    ui.painter().hline(
+        card.response.rect.x_range(),
+        card.response.rect.top(),
+        Stroke::new(2., colors.secondary),
+    );
 }
 fn default_path(p: &Project) -> PathBuf {
     data_dir()

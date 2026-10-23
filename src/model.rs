@@ -132,30 +132,30 @@ fn workspace_for_executable_dir(executable_dir: &Path) -> PathBuf {
     };
     // Only the standard Cargo output layout implies a repository executable.
     // A standalone binary nested beneath an unrelated Cargo.toml remains standalone.
-    if named(profile_dir, "debug") || named(profile_dir, "release") {
-        if let Some(parent) = profile_dir.parent() {
-            let target = if named(parent, "target") {
-                Some(parent)
-            } else {
-                let is_target_triple = parent
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.contains('-')
-                            && name
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-                    });
-                parent
-                    .parent()
-                    .filter(|directory| is_target_triple && named(directory, "target"))
-            };
-            if let Some(repository) = target
-                .and_then(Path::parent)
-                .filter(|directory| directory.join("Cargo.toml").is_file())
-            {
-                return repository.join("workspace");
-            }
+    if (named(profile_dir, "debug") || named(profile_dir, "release"))
+        && let Some(parent) = profile_dir.parent()
+    {
+        let target = if named(parent, "target") {
+            Some(parent)
+        } else {
+            let is_target_triple = parent
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.contains('-')
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                });
+            parent
+                .parent()
+                .filter(|directory| is_target_triple && named(directory, "target"))
+        };
+        if let Some(repository) = target
+            .and_then(Path::parent)
+            .filter(|directory| directory.join("Cargo.toml").is_file())
+        {
+            return repository.join("workspace");
         }
     }
     executable_dir.join("workspace")
@@ -756,7 +756,10 @@ fn parse_csv(bytes: &[u8], source: &str) -> Result<Vec<Reading>> {
 
 fn decode_csv_text(bytes: &[u8]) -> Result<String> {
     let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
-        ensure!(bytes.len() % 2 == 0, "CSV contains incomplete UTF-16 text");
+        ensure!(
+            bytes.len().is_multiple_of(2),
+            "CSV contains incomplete UTF-16 text"
+        );
         let little_endian = bytes[0] == 0xff;
         let units = bytes[2..]
             .chunks_exact(2)

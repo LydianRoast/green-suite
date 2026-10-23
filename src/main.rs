@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Kevin R. Whiteman. All rights reserved.
 mod app;
+mod appearance;
 mod model;
 mod pdf;
 mod traverse;
