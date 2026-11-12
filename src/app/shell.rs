@@ -276,7 +276,7 @@ impl GreenSuite {
                 .is_some_and(|device| device.port == self.port);
             if identified {
                 ui.label(
-                    RichText::new(if download { "WR-401 connected" } else { "WR-401" })
+                    RichText::new(if download { "WR-401 identified" } else { "WR-401" })
                     .color(colors.green),
                 );
                 ui.menu_button("Connection", |ui| {
@@ -297,7 +297,7 @@ impl GreenSuite {
             if download
                 && ui
                     .add_enabled(
-                        !self.busy && !self.live_running && identified,
+                        !self.busy && !self.live_running && !self.demo && identified,
                         Button::new(RichText::new("Download records").color(Color32::WHITE))
                             .fill(colors.action),
                     )
@@ -333,7 +333,15 @@ impl GreenSuite {
     }
 
     fn connection_controls(&mut self, ui: &mut Ui, ctx: &Context) {
-        let enabled = !self.busy && !self.live_running;
+        let enabled = !self.busy && !self.live_running && !self.demo;
+        if self.device.is_none()
+            && let Some(previous) = &self.previous_reporter
+        {
+            ui.small(format!(
+                "Previous: {} · {}",
+                previous.model, previous.serial
+            ));
+        }
         ui.add_enabled_ui(enabled, |ui| {
             ComboBox::from_id_salt("ports")
                 .width(105.)
@@ -344,36 +352,65 @@ impl GreenSuite {
                 })
                 .show_ui(ui, |ui| {
                     for port in &self.ports {
+                        let hint = self.previous_bridge.as_ref().and_then(|previous| {
+                            self.inventory
+                                .get(port)
+                                .map(|current| current.hint(previous))
+                        });
                         if ui
-                            .selectable_value(&mut self.port, port.clone(), port)
+                            .selectable_value(
+                                &mut self.port,
+                                port.clone(),
+                                hint.map(|hint| format!("{port} · {hint}"))
+                                    .unwrap_or_else(|| port.clone()),
+                            )
                             .changed()
                         {
                             self.device = None;
+                            self.connection_epoch = self.connection_epoch.wrapping_add(1);
                         }
                     }
                 });
         });
         if ui
-            .add_enabled(enabled && !self.port.is_empty(), Button::new("Connect"))
+            .add_enabled(
+                enabled && !self.port.is_empty(),
+                Button::new(if self.previous_reporter.is_some() {
+                    "Reconnect"
+                } else {
+                    "Connect"
+                }),
+            )
             .clicked()
         {
-            self.probe(ctx);
+            self.probe(ctx, true);
         }
         if ui
-            .add_enabled(enabled, Button::new("Refresh"))
+            .add_enabled(
+                !self.inventory_pending && !self.demo,
+                Button::new("Refresh"),
+            )
             .on_hover_text("Refresh USB ports")
             .clicked()
         {
-            match usb::list_ports() {
-                Ok(ports) => {
-                    self.ports = ports;
-                    if !self.ports.contains(&self.port) {
-                        self.port = self.ports.first().cloned().unwrap_or_default();
-                        self.device = None;
-                    }
-                }
-                Err(error) => self.message(error.to_string(), true),
-            }
+            self.refresh_inventory(ctx);
         }
+        ui.menu_button("USB details",|ui| {
+            ui.set_max_width(480.);
+            if let Some(previous)=&self.previous_reporter {
+                ui.label(format!("Previous Reporter: {} · {} · {}",previous.model,previous.serial,previous.firmware));
+                if self.device.is_none() && ui.add_enabled(enabled && !self.port.is_empty(),Button::new("Identify selected as another Reporter")).clicked() {self.probe(ctx,false);ui.close();}
+            }
+            if let Some(port)=self.inventory.get(&self.port) {
+                if let (Some(vid),Some(pid))=(port.vid,port.pid) {ui.label(format!("USB VID/PID: {vid:04X}/{pid:04X}"));}
+                ui.label(format!("Bridge serial: {}",port.bridge_serial.as_deref().unwrap_or("Unavailable")));
+                ui.label(format!("USB location: {}",port.location.as_deref().unwrap_or("Unavailable")));
+            }
+            if self.inventory_pending {ui.label("Refreshing OS port inventory…");}
+            if self.inventory_error.is_some() {ui.label("Port enumeration unavailable; last successful inventory retained.");}
+            if let Some(warning)=&self.inventory.location_warning {ui.label(warning);}
+            ui.label("USB details are hints. Reconnect checks the previous Reporter serial before enabling a download. A new download starts from the beginning; it does not resume a record cursor.");
+            if ui.button("Export redacted USB summary…").clicked() {self.export_usb_summary();ui.close();}
+        });
     }
 }

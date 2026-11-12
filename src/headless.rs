@@ -32,12 +32,14 @@ pub fn render_png(
     let mut textures = HashMap::new();
     let mut final_primitives = Vec::new();
     // Egui needs an initial sizing pass for panels, grids, and scroll areas.
-    // Four passes settle layout and font-atlas updates without wall-clock waits.
-    for frame in 0..4 {
+    // Eight passes settle layout, scrolling and font-atlas updates without waits.
+    for frame in 0..8 {
         let mut input = egui::RawInput {
             screen_rect: Some(screen),
             max_texture_side: Some(4096),
-            time: Some(f64::from(frame) / 60.0),
+            // Deterministic virtual time lets window fade-in animations finish
+            // before the final pass, without sleeping or opening a window.
+            time: Some(f64::from(frame) / 4.0),
             ..Default::default()
         };
         if let Some(viewport) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
@@ -50,7 +52,7 @@ pub fn render_png(
         for (id, delta) in output.textures_delta.set {
             update_texture(&mut textures, id, delta)?;
         }
-        if frame == 3 {
+        if frame == 7 {
             final_primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
         } else {
             for id in output.textures_delta.free {

@@ -20,6 +20,9 @@ serde_json = "1"
 serialport = { version = "4", default-features = false }
 uuid = { version = "1", features = ["v4", "serde"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation"] }
+
 [profile.release]
 opt-level = 2
 lto = "thin"

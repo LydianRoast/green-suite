@@ -8,11 +8,14 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{NaiveDate, Utc};
 use serde_json::json;
-use serialport::{ClearBuffer, SerialPort};
+use serialport::ClearBuffer;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use crate::model::Reading;
+
+pub mod inventory;
+pub mod replay;
 
 const MAX_GROUPS: u32 = 10_000;
 const MAX_RECORDS: u32 = 1_000_000;
@@ -37,20 +40,14 @@ pub struct DownloadResult {
     pub complete: bool,
 }
 
-pub fn list_ports() -> Result<Vec<String>> {
-    // Include all enumerated ports: Windows does not always expose USB metadata
-    // for a previously installed CP210x serial driver.
-    let mut ports: Vec<_> = serialport::available_ports()?
-        .into_iter()
-        .map(|p| p.port_name)
-        .collect();
-    ports.sort();
-    ports.dedup();
-    Ok(ports)
-}
-
 pub fn probe(port: &str) -> Result<DeviceInfo> {
     Session::open(port)?.device_info(port)
+}
+
+pub fn probe_identified(port: &str, expected_serial: Option<&str>) -> Result<DeviceInfo> {
+    let device = probe(port)?;
+    verify_identity(expected_serial, &device.serial)?;
+    Ok(device)
 }
 
 /// Preserves identification traffic even when the Reporter does not answer.
@@ -89,8 +86,17 @@ pub fn probe_logged(port: &str, raw_path: &std::path::Path) -> Result<DeviceInfo
 /// On an interrupted cursor operation, partial data and an explicit warning are
 /// returned. Retrying a "next" command could silently skip a record, so we do not.
 pub fn download(port: &str, progress: impl Fn(String)) -> Result<DownloadResult> {
+    download_identified(port, None, progress)
+}
+
+pub fn download_identified(
+    port: &str,
+    expected_serial: Option<&str>,
+    progress: impl Fn(String),
+) -> Result<DownloadResult> {
     let mut session = Session::open(port)?;
     let device = session.device_info(port)?;
+    verify_identity(expected_serial, &device.serial)?;
     let mut readings = Vec::new();
     let mut warnings = Vec::new();
     let result = download_records(
@@ -183,6 +189,7 @@ fn download_records(
         ));
     }
     let mut downloaded = 0u32;
+    let session_id = uuid::Uuid::new_v4().to_string();
     let mut skipped = 0usize;
     let mut unitless = 0usize;
     for group in groups {
@@ -209,8 +216,17 @@ fn download_records(
                 ),
             )?;
             match decode_record(&payload[2..], &device.serial, &group.name, index + 1) {
-                Ok(decoded) => {
+                Ok(mut decoded) => {
                     unitless += decoded.unitless;
+                    let received = Utc::now().to_rfc3339();
+                    for reading in &mut decoded.readings {
+                        if let Some(metadata) = &mut reading.metadata {
+                            metadata.firmware = Some(device.firmware.clone());
+                            metadata.download_session = Some(session_id.clone());
+                            metadata.received_at_utc = Some(received.clone());
+                            metadata.checksum = Some(session.last_checksum.into());
+                        }
+                    }
                     readings.extend(decoded.readings);
                 }
                 Err(error) => {
@@ -314,10 +330,11 @@ impl Query {
 }
 
 struct Session {
-    port: Box<dyn SerialPort>,
+    port: crate::connection::Connection,
     raw_log: String,
     transactions: usize,
     unverified_checksums: usize,
+    last_checksum: &'static str,
 }
 
 fn metadata_retry<T>(query: Query, mut operation: impl FnMut(usize) -> Result<T>) -> Result<T> {
@@ -353,6 +370,7 @@ impl Session {
             raw_log: String::new(),
             transactions: 0,
             unverified_checksums: 0,
+            last_checksum: "not-checked",
         })
     }
 
@@ -406,6 +424,7 @@ impl Session {
                 format!("Reading {label}; cursor command was not retried to avoid skipping stored records")
             }
         })?;
+        self.last_checksum = response.checksum_mode;
         ensure!(
             response.checksum_mode != "unverified"
                 || matches!(query, Query::FirstRecord(_) | Query::NextRecord),
@@ -467,6 +486,14 @@ fn validate_serial(serial: &str) -> Result<()> {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')),
         "Unsupported device serial number format"
+    );
+    Ok(())
+}
+
+fn verify_identity(expected: Option<&str>, actual: &str) -> Result<()> {
+    ensure!(
+        expected.is_none_or(|expected| expected == actual),
+        "The Reporter identity changed since connection. No stored-record cursor was started. Reconnect and review the selected instrument before downloading."
     );
     Ok(())
 }
@@ -643,6 +670,21 @@ fn decode_record(data: &[u8], serial: &str, group: &str, index: u32) -> Result<D
             unitless += 1;
         } else {
             readings.push(Reading {
+                metadata: Some(crate::measurement::Metadata {
+                    reporter_serial: Some(serial.into()),
+                    record_group: Some(group.into()),
+                    record_index: Some(index),
+                    sensor_address: Some(header[8]),
+                    channel: Some(u16::from(header[9]) + 1),
+                    original_numeric: Some(number.into()),
+                    original_unit: Some(unit.into()),
+                    parser_version: Some(concat!("stored-v1/", env!("CARGO_PKG_VERSION")).into()),
+                    time_basis: crate::measurement::TimeBasis::InstrumentLocal,
+                    quantity: crate::units::Unit::parse(unit)
+                        .map(|unit| unit.quantity())
+                        .unwrap_or_default(),
+                    ..Default::default()
+                }),
                 id: format!(
                     "wr:{serial}:{group}:{index}:{}:{}:{block_index}",
                     header[8], header[9]
@@ -684,6 +726,13 @@ fn measurement_kind(unit: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identified_download_cannot_follow_a_reused_port_to_another_reporter() {
+        assert!(verify_identity(Some("EXAMPLE_A"), "EXAMPLE_A").is_ok());
+        assert!(verify_identity(Some("EXAMPLE_A"), "EXAMPLE_B").is_err());
+        assert!(verify_identity(None, "EXAMPLE_B").is_ok());
+    }
     use std::io::Cursor;
 
     #[test]

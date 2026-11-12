@@ -7,7 +7,6 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use chrono::{NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use serialport::SerialPort;
 use std::{
     collections::{HashSet, VecDeque},
     fs::{File, OpenOptions},
@@ -117,7 +116,7 @@ fn receive_session(
     }
 }
 
-fn open_live_port(port_name: &str) -> Result<Box<dyn SerialPort>> {
+fn open_live_port(port_name: &str) -> Result<crate::connection::Connection> {
     crate::connection::open(port_name, IO_TIMEOUT)
 }
 
@@ -165,7 +164,7 @@ impl Command {
 }
 
 struct Session<'a, F: Fn(LiveEvent)> {
-    port: Box<dyn SerialPort>,
+    port: crate::connection::Connection,
     stop: &'a AtomicBool,
     emit: &'a F,
     capture: &'a mut Capture,

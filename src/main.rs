@@ -1,12 +1,16 @@
 // Copyright (c) 2026 Kevin R. Whiteman. All rights reserved.
+mod analysis;
 mod app;
 mod appearance;
 mod connection;
 mod headless;
 mod live;
+mod measurement;
 mod model;
 mod pdf;
+mod standards;
 mod traverse;
+mod units;
 mod usb;
 
 use anyhow::{Context, Result};
@@ -20,9 +24,53 @@ fn main() -> Result<()> {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    if !args.iter().any(|arg| arg == "--help" || arg == "-h")
+        && let Some(path) = option("--replay-usb")
+    {
+        let report = usb::replay::inspect(std::path::Path::new(&path))?;
+        let json = serde_json::to_string_pretty(&report)?;
+        if let Some(path) = option("--report") {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .context("Creating replay report without replacing an existing file")?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+        }
+        println!("{json}");
+        anyhow::ensure!(
+            report.transactions > 0,
+            "Capture contains no stored USB transactions"
+        );
+        anyhow::ensure!(
+            report.rejected_transactions == 0 && report.invalid_lines == 0,
+            "Replay found rejected transactions or invalid capture lines; inspect the report"
+        );
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--usb-inventory")
+        && !args.iter().any(|a| a == "--help" || a == "-h")
+    {
+        let mut tracker = usb::inventory::Tracker::default();
+        tracker.update(usb::inventory::enumerate()?)?;
+        let report = tracker.redacted_summary(false, false);
+        if let Some(path) = option("--report") {
+            usb::inventory::write_summary(std::path::Path::new(&path), &report)?;
+        }
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
             "Green Suite\n\nRun without arguments for the native GUI.\n  --project PATH           Open a saved project\n  --probe COM5 [--out DIR] Read USB device information; optionally save diagnostics\n  --download COM5 --out DIR Download stored readings and raw packets\n  --capture-live COM5 --seconds N --out DIR\n                           Record a bounded live USB session\n  --pdf-check PATH          Inspect and render a PDF's first page\n  --demo                   Open the clearly labeled example project\n  --view traverse|readings|live\n                           Select initial view\n  --screenshot PATH        Save a GUI screenshot and exit\n  --preview-ui PATH        Render a windowless UI preview\n  --size WIDTHxHEIGHT      Preview dimensions (default 1280x800)\n  --theme dark|light       Preview appearance\n  --palette evergreen|urbane\n                           Preview color scheme"
+        );
+        println!(
+            "  --replay-usb PATH [--report FILE]\n                           Inspect a stored USB capture offline; never opens a port"
+        );
+        println!(
+            "  --usb-inventory [--report FILE]\n                           Redacted OS port inventory; never opens a serial handle"
         );
         return Ok(());
     }

@@ -79,6 +79,9 @@ fn sample_count(traverse: &Traverse) -> Result<usize> {
 /// Partial means are reported, but a flow is returned only for a complete traverse.
 pub fn calculate(traverse: &Traverse) -> Result<TraverseResult> {
     let total = sample_count(traverse)?;
+    if traverse.sample_sources.len() > traverse.velocities.len() {
+        bail!("Saved sample sources exceed the traverse layout.");
+    }
     let area_sq_ft = if circular(&traverse.shape) {
         if !traverse.diameter.is_finite() || traverse.diameter <= 0.0 {
             bail!("Diameter must be a finite number greater than zero.");
@@ -172,6 +175,120 @@ pub fn velocity_to_fpm(value: f64, unit: &str) -> Option<f64> {
     value.is_finite().then_some(value)
 }
 
+/// Assign one stored record to one position; equal values from distinct records are valid.
+fn assign_sample(traverse: &mut Traverse, position: usize, reading: &Reading) -> Result<()> {
+    if position >= traverse.velocities.len() {
+        bail!("Select a valid traverse position.");
+    }
+    if traverse
+        .sample_sources
+        .iter()
+        .enumerate()
+        .any(|(index, source)| {
+            index != position
+                && source
+                    .as_ref()
+                    .is_some_and(|source| source.reading_id == reading.id)
+        })
+    {
+        bail!("This reading is already assigned to another position.");
+    }
+    if reading.metadata.as_ref().is_some_and(|metadata| {
+        !matches!(
+            metadata.quantity,
+            crate::units::Quantity::Unknown | crate::units::Quantity::Velocity
+        )
+    }) {
+        bail!("The reading is not identified as velocity.");
+    }
+    let value = velocity_to_fpm(reading.value, &reading.unit)
+        .ok_or_else(|| anyhow::anyhow!("Choose a finite, nonnegative velocity reading."))?;
+    let source = crate::measurement::Input::from_reading(reading)?;
+    traverse
+        .sample_sources
+        .resize(traverse.velocities.len(), None);
+    traverse.sample_sources[position] = Some(source);
+    traverse.velocities[position] = Some(value);
+    Ok(())
+}
+
+pub fn validate_sources(traverse: &Traverse, readings: &[Reading]) -> Result<()> {
+    let current: std::collections::HashMap<_, _> =
+        readings.iter().map(|r| (r.id.as_str(), r)).collect();
+    let mut used = std::collections::HashSet::new();
+    for (index, source) in traverse.sample_sources.iter().enumerate() {
+        let Some(source) = source else { continue };
+        if !used.insert(&source.reading_id) {
+            bail!("One reading is assigned to multiple positions. Reassign the samples.");
+        }
+        let reading = current.get(source.reading_id.as_str()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Position {}: source reading is missing. Reassign or enter a manual value.",
+                index + 1
+            )
+        })?;
+        if crate::measurement::Input::from_reading(reading)? != *source
+            || velocity_to_fpm(reading.value, &reading.unit).is_none()
+            || traverse.velocities.get(index).copied().flatten()
+                != velocity_to_fpm(reading.value, &reading.unit)
+        {
+            bail!(
+                "Position {}: source reading changed. Reassign or enter a manual value.",
+                index + 1
+            );
+        }
+    }
+    Ok(())
+}
+
+fn set_manual(traverse: &mut Traverse, index: usize, text: &str) {
+    if let Some(source) = traverse.sample_sources.get_mut(index) {
+        *source = None;
+    }
+    traverse.velocities[index] = text
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0);
+}
+
+pub fn capture(traverse: &Traverse, readings: &[Reading]) -> Result<Reading> {
+    validate_sources(traverse, readings)?;
+    let result = calculate(traverse)?;
+    let flow = result
+        .flow_cfm
+        .ok_or_else(|| anyhow::anyhow!("Complete every position before capturing flow."))?;
+    let inputs: Vec<_> = traverse.sample_sources.iter().flatten().cloned().collect();
+    Ok(Reading {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        group: traverse.name.clone(),
+        sensor: "Traverse calculation".into(),
+        kind: "Airflow".into(),
+        value: flow,
+        unit: "CFM".into(),
+        source: "traverse".into(),
+        raw: format!("Equal-area traverse: {} positions; {:.4} ft²", result.total, result.area_sq_ft),
+        metadata: Some(crate::measurement::Metadata {
+            origin: crate::measurement::Origin::ApplicationCalculated,
+            quantity: crate::units::Quantity::VolumeFlow,
+            time_basis: crate::measurement::TimeBasis::PcUtc,
+            derivation: Some(crate::measurement::Derivation {
+                formula: "equal-area-traverse".into(),
+                version: "2".into(),
+                assumptions: [
+                    ("layout_and_samples".into(), serde_json::to_string(traverse)?),
+                    ("manual_or_legacy_positions".into(), (result.total - inputs.len()).to_string()),
+                    ("velocity_conversion".into(), "ft/min; m/s × 60 / 0.3048".into()),
+                    ("sampling".into(), "Equal-area positions; stored records are not assumed simultaneous; dimensions in inches".into()),
+                ].into(),
+                inputs,
+            }),
+            ..Default::default()
+        }),
+    })
+}
+
 #[derive(Clone, PartialEq)]
 struct Layout {
     shape: String,
@@ -207,6 +324,7 @@ impl Layout {
         traverse.rows = self.rows;
         traverse.columns = self.columns;
         traverse.velocities = vec![None; self.rows * self.columns];
+        traverse.sample_sources.clear();
     }
 }
 
@@ -536,13 +654,31 @@ impl TraverseView {
         let value =
             selected_reading.and_then(|reading| velocity_to_fpm(reading.value, &reading.unit));
         ui.horizontal_wrapped(|ui| {
-            let valid_target = self.selected < traverse.velocities.len();
+            let valid_target = selected_reading.is_some_and(|reading| {
+                self.selected < traverse.velocities.len()
+                    && !traverse
+                        .sample_sources
+                        .iter()
+                        .enumerate()
+                        .any(|(index, source)| {
+                            index != self.selected
+                                && source
+                                    .as_ref()
+                                    .is_some_and(|source| source.reading_id == reading.id)
+                        })
+                    && reading.metadata.as_ref().is_none_or(|metadata| {
+                        matches!(
+                            metadata.quantity,
+                            crate::units::Quantity::Unknown | crate::units::Quantity::Velocity
+                        )
+                    })
+            });
             if ui
                 .add_enabled(value.is_some() && valid_target, egui::Button::new("Assign"))
                 .clicked()
             {
-                traverse.velocities[self.selected] = value;
-                changed = true;
+                changed = selected_reading
+                    .is_some_and(|reading| assign_sample(traverse, self.selected, reading).is_ok());
             }
             if ui
                 .add_enabled(
@@ -551,9 +687,18 @@ impl TraverseView {
                 )
                 .clicked()
             {
-                traverse.velocities[self.selected] = value;
-                self.selected = (self.selected + 1) % traverse.velocities.len();
-                changed = true;
+                changed = selected_reading
+                    .is_some_and(|reading| assign_sample(traverse, self.selected, reading).is_ok());
+                if changed {
+                    let count = traverse.velocities.len();
+                    self.selected = (1..=count)
+                        .map(|offset| (self.selected + offset) % count)
+                        .find(|&index| traverse.velocities[index].is_none())
+                        .unwrap_or(self.selected);
+                }
+            }
+            if value.is_some() && !valid_target {
+                ui.small("Already assigned, or not a velocity record.");
             }
         });
         if let Some(value) = value {
@@ -593,6 +738,7 @@ impl TraverseView {
                 ui.label("Clear every velocity in this traverse?");
                 if ui.button("Clear all velocities").clicked() {
                     traverse.velocities.fill(None);
+                    traverse.sample_sources.clear();
                     self.sync_inputs(traverse);
                     self.clear_confirmation = false;
                     changed = true;
@@ -668,16 +814,24 @@ impl TraverseView {
                                 let text = self.input_values[index].trim();
                                 // Invalid edits clear the sample, withholding flow without placing NaN
                                 // into a project that must remain serializable and safe to save.
-                                traverse.velocities[index] = text
-                                    .parse::<f64>()
-                                    .ok()
-                                    .filter(|value| value.is_finite() && *value >= 0.0);
+                                set_manual(traverse, index, text);
                                 self.selected = index;
                                 changed = true;
                             }
                             match traverse.velocities[index] {
                                 Some(value) if value.is_finite() && value >= 0.0 => {
-                                    ui.colored_label(colors.green, "Captured");
+                                    let saved = traverse
+                                        .sample_sources
+                                        .get(index)
+                                        .is_some_and(Option::is_some);
+                                    ui.colored_label(
+                                        colors.green,
+                                        if saved {
+                                            "Saved reading"
+                                        } else {
+                                            "Manual / legacy"
+                                        },
+                                    );
                                 }
                                 Some(_) => {
                                     ui.colored_label(colors.error, "Invalid value");
@@ -1071,6 +1225,7 @@ mod tests {
             rows: 2,
             columns: 2,
             velocities: vec![Some(100.0), Some(200.0), Some(300.0), Some(400.0)],
+            sample_sources: Vec::new(),
             point_id: None,
         }
     }
@@ -1084,6 +1239,86 @@ mod tests {
         assert_eq!(
             point_positions(&rectangle()),
             vec![[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]]
+        );
+    }
+
+    fn velocity(id: &str, value: f64) -> Reading {
+        Reading {
+            id: id.into(),
+            value,
+            unit: "fpm".into(),
+            timestamp: "2026-01-01T12:00:00Z".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn assignments_are_unique_and_manual_edits_clear_source() {
+        let mut traverse = rectangle();
+        let a = velocity("a", 100.0);
+        let b = velocity("b", 100.0);
+        assign_sample(&mut traverse, 0, &a).unwrap();
+        assert!(assign_sample(&mut traverse, 1, &a).is_err());
+        assign_sample(&mut traverse, 1, &b).unwrap();
+        set_manual(&mut traverse, 0, "100");
+        assert!(traverse.sample_sources[0].is_none());
+        assign_sample(&mut traverse, 2, &a).unwrap();
+        let layout = Layout::from_traverse(&traverse);
+        layout.apply(&mut traverse);
+        assert!(traverse.sample_sources.is_empty());
+        assert!(traverse.velocities.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn capture_rejects_stale_missing_and_incomplete_inputs() {
+        let mut traverse = rectangle();
+        let mut a = velocity("a", 100.0);
+        assign_sample(&mut traverse, 0, &a).unwrap();
+        assert!(capture(&traverse, &[]).is_err());
+        a.value = 200.0;
+        assert!(capture(&traverse, &[a.clone()]).is_err());
+        a.value = 100.0;
+        a.unit = "CFM".into();
+        assert!(capture(&traverse, &[a.clone()]).is_err());
+        a.unit = "fpm".into();
+        traverse.velocities[3] = None;
+        assert!(capture(&traverse, &[a]).is_err());
+    }
+
+    #[test]
+    fn legacy_and_linked_traverses_roundtrip_without_losing_inputs() {
+        let mut traverse = rectangle();
+        let legacy = serde_json::to_value(&traverse).unwrap();
+        assert!(legacy.get("sample_sources").is_none());
+        let loaded: Traverse = serde_json::from_value(legacy).unwrap();
+        assert_eq!(capture(&loaded, &[]).unwrap().value, 500.0);
+        let a = velocity("a", 100.0);
+        assign_sample(&mut traverse, 0, &a).unwrap();
+        let loaded: Traverse =
+            serde_json::from_str(&serde_json::to_string(&traverse).unwrap()).unwrap();
+        let result = capture(&loaded, &[a]).unwrap();
+        let derivation = result
+            .metadata
+            .as_ref()
+            .unwrap()
+            .derivation
+            .as_ref()
+            .unwrap();
+        assert_eq!(derivation.inputs.len(), 1);
+        assert_eq!(derivation.assumptions["manual_or_legacy_positions"], "3");
+        assert_eq!(derivation.inputs[0].reading_id, "a");
+        assert!(!result.timestamp_is_measurement_candidate());
+        let mut project = crate::model::Project::new("example");
+        project.readings.push(result);
+        let path =
+            std::env::temp_dir().join(format!("green-suite-traverse-{}.csv", uuid::Uuid::new_v4()));
+        project.export_csv(&path).unwrap();
+        let mut imported = crate::model::Project::new("import");
+        imported.import_csv(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&project.readings[0].metadata).unwrap(),
+            serde_json::to_value(&imported.readings[0].metadata).unwrap()
         );
     }
 

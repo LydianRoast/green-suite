@@ -61,6 +61,8 @@ pub struct Reading {
     pub unit: String,
     pub source: String,
     pub raw: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<crate::measurement::Metadata>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,6 +78,9 @@ pub struct Traverse {
     pub rows: usize,
     pub columns: usize,
     pub velocities: Vec<Option<f64>>,
+    /// Saved-reading snapshots by position. Missing entries are manual/legacy values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_sources: Vec<Option<crate::measurement::Input>>,
     pub point_id: Option<String>,
 }
 
@@ -91,6 +96,7 @@ impl Default for Traverse {
             rows: 5,
             columns: 5,
             velocities: vec![None; 25],
+            sample_sources: Vec::new(),
             point_id: None,
         }
     }
@@ -249,13 +255,31 @@ impl Project {
         let mut ids: HashSet<String> = self.readings.iter().map(|r| r.id.clone()).collect();
         let mut keys: HashSet<String> = self.readings.iter().map(reading_key).collect();
         let mut additions = Vec::new();
+        let enrichable: HashMap<String, usize> = self
+            .readings
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.metadata.is_none())
+            .map(|(i, r)| (reading_key(r), i))
+            .collect();
+        let mut metadata_additions = HashMap::new();
         for mut reading in incoming {
             ensure!(
                 reading.value.is_finite(),
                 "A reading contains a non-finite value"
             );
+            if let Some(metadata) = &reading.metadata {
+                metadata.validate(reading.value)?;
+            }
             let key = reading_key(&reading);
             if keys.contains(&key) {
+                if let Some(metadata) = &reading.metadata
+                    && let Some(&index) = enrichable.get(&key)
+                {
+                    metadata_additions
+                        .entry(index)
+                        .or_insert_with(|| metadata.clone());
+                }
                 continue;
             }
             if reading.id.is_empty() {
@@ -275,6 +299,11 @@ impl Project {
             "Project exceeds 500,000 readings"
         );
         let count = additions.len();
+        for (index, metadata) in metadata_additions {
+            if self.readings[index].metadata.is_none() {
+                self.readings[index].metadata = Some(metadata);
+            }
+        }
         self.readings.extend(additions);
         Ok(count)
     }
@@ -295,6 +324,7 @@ impl Project {
             "raw",
             "points",
             "green_suite_csv_version",
+            "metadata_json",
         ])?;
         let mut point_labels: HashMap<&str, Vec<&str>> = HashMap::new();
         for point in &self.points {
@@ -322,6 +352,14 @@ impl Project {
                 csv_text(&reading.raw),
                 csv_text(&points),
                 "1".to_string(),
+                csv_text(
+                    &reading
+                        .metadata
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?
+                        .unwrap_or_default(),
+                ),
             ])?;
         }
         let bytes = writer.into_inner().context("Cannot finish CSV export")?;
@@ -361,6 +399,9 @@ impl Project {
                 "Reading {} contains a non-finite value",
                 reading.id
             );
+            if let Some(metadata) = &reading.metadata {
+                metadata.validate(reading.value)?;
+            }
         }
         for point in &self.points {
             ensure!(
@@ -415,6 +456,25 @@ impl Project {
                 traverse.velocities.len() == count,
                 "Traverse velocity count does not match its layout"
             );
+            ensure!(
+                traverse.sample_sources.len() <= count,
+                "Traverse source count exceeds its layout"
+            );
+            let mut source_ids = HashSet::new();
+            for (index, source) in traverse.sample_sources.iter().enumerate() {
+                if let Some(source) = source {
+                    ensure!(
+                        !source.reading_id.is_empty() && source_ids.insert(&source.reading_id),
+                        "Traverse sources must identify unique reading records"
+                    );
+                    ensure!(
+                        crate::traverse::velocity_to_fpm(source.value, &source.unit).is_some()
+                            && crate::traverse::velocity_to_fpm(source.value, &source.unit)
+                                == traverse.velocities[index],
+                        "Traverse source does not match its captured velocity"
+                    );
+                }
+            }
             ensure!(
                 [traverse.width, traverse.height, traverse.diameter]
                     .iter()
@@ -707,7 +767,20 @@ fn parse_csv(bytes: &[u8], source: &str) -> Result<Vec<Reading>> {
             } else {
                 original_raw
             };
+            let metadata_json = cell(row, column(&headers, &["metadatajson"]), encoded);
+            let metadata: Option<crate::measurement::Metadata> = if metadata_json.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::from_str(&metadata_json)
+                        .context("Invalid measurement metadata JSON")?,
+                )
+            };
+            if let Some(metadata) = &metadata {
+                metadata.validate(value)?;
+            }
             result.push(Reading {
+                metadata,
                 id: if id.is_empty() || values.len() > 1 {
                     Uuid::new_v4().to_string()
                 } else {
@@ -816,6 +889,86 @@ fn infer_kind(unit: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provenance_survives_project_csv_and_duplicate_enrichment() {
+        use crate::measurement::{Calibration, Metadata, Origin};
+        let folder = scratch();
+        let mut project = Project::new("Provenance example");
+        let legacy: Reading =
+            serde_json::from_str(r#"{"id":"source","value":1.25,"unit":"inW"}"#).unwrap();
+        assert!(legacy.metadata.is_none());
+        project.merge_readings(vec![legacy.clone()]).unwrap();
+        let mut enriched = legacy.clone();
+        enriched.metadata = Some(Metadata {
+            original_numeric: Some("1.2500".into()),
+            original_unit: Some("inW".into()),
+            role: "Filter upstream".into(),
+            calibration: Some(Calibration {
+                reference: "EXAMPLE-CAL".into(),
+                uncertainty: Some(0.01),
+                unit: "inW".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(project.merge_readings(vec![enriched.clone()]).unwrap(), 0);
+        assert_eq!(project.readings.len(), 1);
+        assert_eq!(
+            project.readings[0].metadata.as_ref().unwrap().origin,
+            Origin::Unknown
+        );
+        project.merge_readings(vec![legacy]).unwrap();
+        assert_eq!(
+            project.readings[0]
+                .metadata
+                .as_ref()
+                .unwrap()
+                .original_numeric
+                .as_deref(),
+            Some("1.2500")
+        );
+        let path = folder.join("project.green-suite.json");
+        project.save(&path).unwrap();
+        let loaded = Project::load(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&loaded.readings).unwrap(),
+            serde_json::to_value(&project.readings).unwrap()
+        );
+        let csv = folder.join("metadata.csv");
+        loaded.export_csv(&csv).unwrap();
+        let mut imported = Project::new("Imported");
+        assert_eq!(imported.import_csv(&csv).unwrap(), 1);
+        assert_eq!(
+            serde_json::to_value(&imported.readings).unwrap(),
+            serde_json::to_value(&project.readings).unwrap()
+        );
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn failed_merge_cannot_partially_enrich_existing_metadata() {
+        let mut project = Project::new("Atomic metadata");
+        let reading = Reading {
+            id: "source".into(),
+            value: 0.,
+            ..Default::default()
+        };
+        project.readings.push(reading.clone());
+        let mut enriched = reading.clone();
+        enriched.metadata = Some(crate::measurement::Metadata {
+            original_numeric: Some("0.0000".into()),
+            ..Default::default()
+        });
+        let invalid = Reading {
+            id: "invalid".into(),
+            value: f64::INFINITY,
+            ..Default::default()
+        };
+        assert!(project.merge_readings(vec![enriched, invalid]).is_err());
+        assert!(project.readings[0].metadata.is_none());
+        assert_eq!(project.readings.len(), 1);
+    }
 
     fn scratch() -> PathBuf {
         let path = std::env::temp_dir().join(format!("green-suite-model-test-{}", Uuid::new_v4()));

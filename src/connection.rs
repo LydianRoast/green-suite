@@ -3,9 +3,84 @@
 
 use anyhow::{Context, Result};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    io::{Read, Write},
+    ops::{Deref, DerefMut},
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
-pub(crate) fn open(name: &str, timeout: Duration) -> Result<Box<dyn SerialPort>> {
+static OWNED_PORTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+struct PortLease(String);
+
+impl PortLease {
+    fn acquire(name: &str) -> Result<Self> {
+        anyhow::ensure!(
+            !name.is_empty() && name == name.trim(),
+            "Invalid serial port name"
+        );
+        #[cfg(windows)]
+        let key = name.trim_start_matches(r"\\.\").to_ascii_uppercase();
+        #[cfg(not(windows))]
+        let key = name.to_owned();
+        let mut owned = OWNED_PORTS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Serial ownership registry unavailable"))?;
+        anyhow::ensure!(
+            owned.insert(key.clone()),
+            "This application already owns the selected serial port; finish its current operation first"
+        );
+        Ok(Self(key))
+    }
+}
+
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        if let Some(owned) = OWNED_PORTS.get()
+            && let Ok(mut owned) = owned.lock()
+        {
+            owned.remove(&self.0);
+        }
+    }
+}
+
+/// Drops the OS handle before releasing application ownership. The application
+/// keeps one wrapped handle per probe, download, or existing live session.
+pub(crate) struct Connection {
+    port: Box<dyn SerialPort>,
+    _lease: PortLease,
+}
+
+impl Deref for Connection {
+    type Target = dyn SerialPort;
+    fn deref(&self) -> &Self::Target {
+        &*self.port
+    }
+}
+impl DerefMut for Connection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.port
+    }
+}
+impl Read for Connection {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.port.read(bytes)
+    }
+}
+impl Write for Connection {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.port.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.port.flush()
+    }
+}
+
+pub(crate) fn open(name: &str, timeout: Duration) -> Result<Connection> {
+    let lease = PortLease::acquire(name)?;
     let mut port = serialport::new(name, 230_400)
         .data_bits(DataBits::Eight)
         .parity(Parity::None)
@@ -20,7 +95,10 @@ pub(crate) fn open(name: &str, timeout: Duration) -> Result<Box<dyn SerialPort>>
     port.write_request_to_send(false).context("Disabling RTS")?;
     port.clear_break()
         .context("Returning serial transmit line to idle")?;
-    Ok(port)
+    Ok(Connection {
+        port,
+        _lease: lease,
+    })
 }
 
 #[cfg(windows)]
@@ -66,6 +144,26 @@ fn windows_error_guidance(code: Option<i32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ownership_survives_competition_and_releases_on_drop() {
+        let name = format!("ownership-{}", uuid::Uuid::new_v4());
+        let first = PortLease::acquire(&name).unwrap();
+        assert!(PortLease::acquire(&name).is_err());
+        let other = PortLease::acquire(&format!("{name}-other")).unwrap();
+        drop(other);
+        assert!(PortLease::acquire(&name).is_err());
+        drop(first);
+        assert!(PortLease::acquire(&name).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_aliases_share_ownership() {
+        let first = PortLease::acquire("COM64591").unwrap();
+        assert!(PortLease::acquire(r"\\.\com64591").is_err());
+        drop(first);
+    }
 
     #[test]
     fn driver_failure_is_not_reported_as_port_contention() {

@@ -27,6 +27,7 @@ slash notation; the original license texts govern the respective components.
 | serde_json | 1.0.154 | MIT OR Apache-2.0 |
 | serialport | 4.10.1 | MPL-2.0 |
 | uuid | 1.28.0 | Apache-2.0 OR MIT |
+| windows-sys (Windows only) | 0.61.2 | MIT OR Apache-2.0 |
 
 Green Suite bundles unmodified **Iosevka Slab Extended Semibold and Bold** static
 TrueType faces from the upstream [34.9.0 release](https://github.com/be5invis/Iosevka/releases/tag/v34.9.0),

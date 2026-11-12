@@ -28,6 +28,17 @@ A measurement workspace for mechanical test and balance work.
 
 ## Interface
 
+**Readings → Analysis** provides stored pressure/temperature comparisons,
+trend/stability summaries, selected-device balancing, and hydronic heat-transfer
+and Cv/Kv valve-flow estimates. **Air state** adds humidity-ratio diagrams,
+dew/frost point, enthalpy and moisture-removal estimates from stored temperature
+and humidity records. Barometric pressure, fluid properties and valve settings
+are explicit.
+Time pairing and
+sampling gaps are explicit; missing balancing inputs withhold complete totals.
+Saved calculated readings retain their selected inputs and rule versions.
+See [stored-reading analysis](ANALYSIS.md) for workflows and limitations.
+
 The compact interface uses **Plan**, **Readings**, **Traverse**, and **Live**
 tabs. Drawing navigation and the point inspector appear in Plan; USB controls
 appear in Readings and Live. Setup instructions and secondary details expand
@@ -63,6 +74,12 @@ Close other software using that serial port before connecting. A port may
 change when an instrument is connected through a different USB socket.
 
 ### USB recovery
+
+The native app tracks passive port arrivals/departures and bridge changes.
+Select a current port and use **Reconnect** to verify the previous Reporter;
+**USB details** provides bridge hints and a redacted diagnostic export.
+Received readings remain in the project. Reconnecting starts a new identification;
+a subsequent download starts from the beginning and never resumes a record cursor.
 
 Stored downloads and live reception share the same 230400-baud, 8N1 setup,
 with flow control, DTR and RTS disabled. Connection failures distinguish a
@@ -249,24 +266,38 @@ the utility. Perl is not required to run the Rust GUI.
 
 ## Planned integrations
 
-Android USB import and AirOne/BuildingStart integration are deferred and are not
-implemented or verified. Their implementation requires a separately approved
-scope and documented destination formats or APIs.
+Source-record review includes optional measurement provenance, calibration notes,
+and unit-conversion previews. Saving a conversion preserves its inputs and creates
+a separate calculated reading. See [measurement records](MEASUREMENTS.md) for unit
+conventions, metadata exports, and the distinction between absolute temperatures
+and temperature differences.
 
-The proposed workflow is to download WR-401 records through Android USB host
-access, review the readings locally, and import selected values into a supported
-destination. Work requires CP210x transport and lifecycle validation, explicit
-unit and field mappings, authentication review, duplicate handling, and recovery
-from interrupted or offline transfers. Acceptance requires a demonstrated USB
-download on supported hardware and a verified import into each destination.
+Stored USB captures can now be checked offline with
+`green-suite.exe --replay-usb capture.raw.ndjson --report replay-summary.json`.
+The report omits source values and identifiers and never opens a device. See
+[compatibility and replay](COMPATIBILITY.md) for evidence levels, limitations,
+and the connection ownership and Reporter identity safeguards.
 
-Original application code remains Rust and Perl. This roadmap does not add
-wireless support or change the project's ownership terms.
+[Stored-reading development plan](DEVELOPMENT.md) covers connection management,
+protocol replay and validation, measurement provenance, unit conversions, and
+pressure, airflow, temperature, psychrometric, and hydronic analysis workflows.
+It distinguishes implemented features from remaining validation and deferred
+work. Sensors remain paired to the Wrist Reporter;
+additional live sensor support and wireless phone connectivity are outside this
+plan.
+
+AirOne/BuildingStart integration is deferred and is not implemented or verified.
+The proposed desktop workflow is to download WR-401 records over USB, review
+them locally, and import selected values into a supported destination. Work
+requires documented destination formats or APIs, explicit unit and field
+mappings, authentication review, duplicate handling, and recovery from
+interrupted or offline transfers. Acceptance requires a verified import into
+each destination. Android USB and mobile application work are excluded.
 
 ## Ownership
 
 See [LICENSE](LICENSE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and
-the dependency notices. The proprietary notice applies to Kevin R. Whiteman's
-original Green Suite code. Evergreen-created/owned material and third-party
+the dependency notices. The proprietary notice applies to original Green Suite
+code. Evergreen-created/owned material and third-party
 libraries retain their respective ownership and license terms. No Evergreen
 executable, library, firmware image, or manual is included in the repository.

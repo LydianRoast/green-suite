@@ -1,5 +1,8 @@
 // Copyright (c) 2026 Kevin R. Whiteman. All rights reserved.
+mod analysis;
+mod review;
 mod shell;
+mod usb_connection;
 
 use crate::{
     appearance::{self, Scheme, palette},
@@ -32,8 +35,9 @@ enum View {
     Live,
 }
 enum Event {
-    Probe(Result<usb::DeviceInfo, String>),
-    Download(Result<usb::DownloadResult, String>),
+    Probe(u64, Result<usb::DeviceInfo, String>),
+    Download(u64, Result<usb::DownloadResult, String>),
+    Inventory(Result<usb::inventory::Snapshot, String>),
     Progress(String),
     Document(Result<Document, String>),
     Page(u64, Result<(usize, usize, Vec<u8>), String>),
@@ -80,6 +84,8 @@ impl LiveChannel {
 }
 
 pub struct GreenSuite {
+    project_revision: u64,
+    stored_analysis: analysis::AnalysisState,
     project: Project,
     path: PathBuf,
     dirty: bool,
@@ -107,6 +113,14 @@ pub struct GreenSuite {
     ports: Vec<String>,
     port: String,
     device: Option<usb::DeviceInfo>,
+    previous_reporter: Option<usb::DeviceInfo>,
+    previous_bridge: Option<usb::inventory::Port>,
+    inventory: usb::inventory::Tracker,
+    inventory_enabled: bool,
+    inventory_pending: bool,
+    inventory_polled_at: Option<Instant>,
+    inventory_error: Option<String>,
+    connection_epoch: u64,
     busy: bool,
     status: String,
     error: bool,
@@ -121,6 +135,7 @@ pub struct GreenSuite {
     show_about: bool,
     status_details: Option<String>,
     source_details: Option<Reading>,
+    measurement_review: review::ReviewState,
     dark_mode: bool,
     scheme: Scheme,
     live_running: bool,
@@ -176,10 +191,8 @@ impl GreenSuite {
                 .filter(|p| p.exists())
                 .unwrap_or_else(|| default_path(&project))
         };
-        let ports = usb::list_ports().unwrap_or_default();
         let mut app = Self::workspace(&cc.egui_ctx, project, path, start_view, dark_mode, scheme);
-        app.port = ports.first().cloned().unwrap_or_default();
-        app.ports = ports;
+        app.inventory_enabled = !demo;
         app.show_devices = demo;
         app.demo = demo;
         app.screenshot = screenshot;
@@ -209,9 +222,16 @@ impl GreenSuite {
             project,
             path,
             dirty: false,
+            project_revision: 0,
+            stored_analysis: Default::default(),
             last_save: Instant::now(),
             view: match start_view {
-                "readings" => View::Readings,
+                "readings"
+                | "review"
+                | "analysis"
+                | "analysis-series"
+                | "analysis-balance"
+                | "analysis-incomplete" => View::Readings,
                 "traverse" => View::Traverse,
                 "live" => View::Live,
                 _ => View::Blueprint,
@@ -238,6 +258,14 @@ impl GreenSuite {
             port: String::new(),
             ports: Vec::new(),
             device: None,
+            previous_reporter: None,
+            previous_bridge: None,
+            inventory: Default::default(),
+            inventory_enabled: false,
+            inventory_pending: false,
+            inventory_polled_at: None,
+            inventory_error: None,
+            connection_epoch: 0,
             busy: false,
             status: String::from("Ready"),
             error: false,
@@ -252,6 +280,7 @@ impl GreenSuite {
             show_about: false,
             status_details: None,
             source_details: None,
+            measurement_review: Default::default(),
             dark_mode,
             scheme,
             live_running: false,
@@ -321,9 +350,16 @@ impl GreenSuite {
                 );
             }
         }
+        if example && view == "review" {
+            app.preview_source_review();
+        }
+        if example && view.starts_with("analysis") {
+            app.preview_stored_analysis(view);
+        }
         app
     }
     fn changed(&mut self) {
+        self.project_revision = self.project_revision.wrapping_add(1);
         self.dirty = true;
     }
     fn message(&mut self, text: impl Into<String>, error: bool) {
@@ -352,6 +388,8 @@ impl GreenSuite {
         }
     }
     fn replace_project(&mut self, p: Project, path: PathBuf, demo: bool, ctx: &Context) {
+        self.project_revision = self.project_revision.wrapping_add(1);
+        self.stored_analysis = Default::default();
         self.project = p;
         self.show_devices = !self.project.points.is_empty();
         self.source_details = None;
@@ -424,7 +462,7 @@ impl GreenSuite {
             context.request_repaint();
         });
     }
-    fn probe(&mut self, ctx: &Context) {
+    fn probe(&mut self, ctx: &Context, reconnect: bool) {
         if self.port.is_empty() || self.busy || self.live_running {
             return;
         }
@@ -434,10 +472,19 @@ impl GreenSuite {
             false,
         );
         let port = self.port.clone();
+        let expected = if reconnect {
+            self.previous_reporter.as_ref().map(|d| d.serial.clone())
+        } else {
+            None
+        };
+        let epoch = self.connection_epoch;
         let tx = self.tx.clone();
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(Event::Probe(usb::probe(&port).map_err(|e| e.to_string())));
+            let _ = tx.send(Event::Probe(
+                epoch,
+                usb::probe_identified(&port, expected.as_deref()).map_err(|e| format!("{e:#}")),
+            ));
             context.request_repaint();
         });
     }
@@ -445,20 +492,26 @@ impl GreenSuite {
         if self.busy || self.port.is_empty() || self.live_running {
             return;
         }
+        if self.device.as_ref().is_none_or(|d| d.port != self.port) {
+            self.message("Identify the selected Reporter before downloading.", true);
+            return;
+        }
         self.busy = true;
         self.message("Downloading stored records over USB…", false);
         let port = self.port.clone();
+        let expected_serial = self.device.as_ref().map(|device| device.serial.clone());
+        let epoch = self.connection_epoch;
         let tx = self.tx.clone();
         let context = ctx.clone();
         std::thread::spawn(move || {
             let progress_tx = tx.clone();
             let progress_ctx = context.clone();
-            let result = usb::download(&port, move |m| {
+            let result = usb::download_identified(&port, expected_serial.as_deref(), move |m| {
                 let _ = progress_tx.send(Event::Progress(m));
                 progress_ctx.request_repaint();
             })
             .map_err(|e| e.to_string());
-            let _ = tx.send(Event::Download(result));
+            let _ = tx.send(Event::Download(epoch, result));
             context.request_repaint();
         });
     }
@@ -631,8 +684,23 @@ impl GreenSuite {
                         }
                     }
                 }
-                Event::Probe(r) => {
+                Event::Inventory(result) => {
+                    self.inventory_pending = false;
+                    match result {
+                        Ok(snapshot) => {
+                            if let Err(error) = self.apply_inventory(snapshot) {
+                                self.inventory_error = Some(error.to_string());
+                            }
+                        }
+                        Err(error) => self.inventory_error = Some(error),
+                    }
+                }
+                Event::Probe(epoch, r) => {
                     self.busy = false;
+                    if epoch != self.connection_epoch {
+                        self.message("USB inventory changed during identification. Select a current port and identify the Reporter again.",true);
+                        continue;
+                    }
                     match r {
                         Ok(device) => {
                             self.message(
@@ -642,6 +710,8 @@ impl GreenSuite {
                                 ),
                                 false,
                             );
+                            self.previous_bridge = self.inventory.get(&device.port).cloned();
+                            self.previous_reporter = Some(device.clone());
                             self.device = Some(device);
                         }
                         Err(e) => {
@@ -650,7 +720,7 @@ impl GreenSuite {
                         }
                     }
                 }
-                Event::Download(r) => {
+                Event::Download(epoch, r) => {
                     self.busy = false;
                     match r {
                         Ok(result) => {
@@ -669,7 +739,7 @@ impl GreenSuite {
                                 .err();
                             let capture_failed = log_error.is_some();
                             let warning = result.warnings.join(" · ");
-                            self.device = Some(result.device);
+                            self.accept_download_identity(epoch, result.device);
                             match self.project.merge_readings(result.readings) {
                                 Ok(n) => {
                                     self.changed();
@@ -805,7 +875,27 @@ impl GreenSuite {
                 });
             });
             if ui.add_enabled(self.selected_reading.is_some(),Button::new("Attach selected reading").min_size(vec2(ui.available_width(),30.))).clicked()&& let Some(id)=&self.selected_reading&& !self.project.points[index].reading_ids.contains(id){self.project.points[index].reading_ids.push(id.clone());dirty=true;}
-            ui.add_space(12.);ui.collapsing("Enter a manual measurement",|ui|{ui.add(DragValue::new(&mut self.manual_value).speed(1.));ui.label(format!("Unit: {}",self.project.points[index].unit));if ui.button("Record and attach").clicked(){let p=&mut self.project.points[index];let id=uuid::Uuid::new_v4().to_string();self.project.readings.push(Reading{id:id.clone(),timestamp:chrono::Local::now().to_rfc3339(),group:p.label.clone(),sensor:"Manual entry".into(),kind:p.kind.clone(),value:self.manual_value,unit:p.unit.clone(),source:"manual".into(),raw:String::new()});p.reading_ids.push(id);dirty=true;}});
+            ui.add_space(12.);
+            ui.collapsing("Enter a manual measurement", |ui| {
+                ui.add(DragValue::new(&mut self.manual_value).speed(1.));
+                ui.label(format!("Unit: {}", self.project.points[index].unit));
+                if ui.button("Record and attach").clicked() && self.manual_value.is_finite() {
+                    let p = &mut self.project.points[index];
+                    let id = uuid::Uuid::new_v4().to_string();
+                    self.project.readings.push(Reading {
+                        id: id.clone(), timestamp: chrono::Utc::now().to_rfc3339(), group: p.label.clone(),
+                        sensor: "Manual entry".into(), kind: p.kind.clone(), value: self.manual_value, unit: p.unit.clone(),
+                        source: "manual".into(), raw: String::new(),
+                        metadata: Some(crate::measurement::Metadata {
+                            origin: crate::measurement::Origin::Manual,
+                            time_basis: crate::measurement::TimeBasis::PcUtc,
+                            quantity: crate::units::Unit::parse(&p.unit).map(|u|u.quantity()).unwrap_or_default(),
+                            ..Default::default()
+                        }),
+                    });
+                    p.reading_ids.push(id); dirty = true;
+                }
+            });
             ui.add_space(15.);if ui.small_button("Delete mapped device…").clicked(){self.confirm_delete=Some(self.project.points[index].id.clone());}
             if dirty{self.changed();}
             });
@@ -1094,6 +1184,9 @@ impl GreenSuite {
         ui.horizontal(|ui| {
             ui.heading("Readings");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Analysis").clicked() {
+                    self.open_analysis();
+                }
                 ui.menu_button("CSV", |ui| {
                     if ui.button("Import CSV…").clicked() {
                         ui.close();
@@ -1270,7 +1363,7 @@ impl GreenSuite {
                                             "{} / {}: {} {}",
                                             reading.group,
                                             reading.sensor,
-                                            reading.value,
+                                            reading_value(reading),
                                             reading.unit
                                         ),
                                     )
@@ -1600,6 +1693,7 @@ impl GreenSuite {
         let flow = traverse::calculate(t)
             .ok()
             .and_then(|result| result.flow_cfm);
+        let source_check = traverse::validate_sources(t, &self.project.readings);
         let mut capture_flow = false;
         ui.horizontal(|ui| {
             ui.menu_button("Details", |ui| {
@@ -1626,23 +1720,19 @@ impl GreenSuite {
                     });
             });
             capture_flow = ui
-                .add_enabled(flow.is_some(), Button::new("Capture flow"))
+                .add_enabled(
+                    flow.is_some() && source_check.is_ok(),
+                    Button::new("Capture flow"),
+                )
                 .on_hover_text("Save calculated CFM in this project")
                 .clicked();
         });
-        if let Some(flow) = flow.filter(|_| capture_flow) {
-            let id = uuid::Uuid::new_v4().to_string();
-            self.project.readings.push(Reading {
-                id: id.clone(),
-                timestamp: chrono::Local::now().to_rfc3339(),
-                group: t.name.clone(),
-                sensor: "Traverse calculation".into(),
-                kind: "Airflow".into(),
-                value: flow,
-                unit: "CFM".into(),
-                source: "traverse".into(),
-                raw: serde_json::to_string(t).unwrap_or_default(),
-            });
+        if let Err(error) = source_check {
+            ui.colored_label(ui.visuals().error_fg_color, error.to_string());
+        }
+        if capture_flow && let Ok(reading) = traverse::capture(t, &self.project.readings) {
+            let id = reading.id.clone();
+            self.project.readings.push(reading);
             if let Some(p) = self
                 .project
                 .points
@@ -1665,6 +1755,14 @@ impl GreenSuite {
     pub fn ui(&mut self, ctx: &Context) {
         let colors = palette(ctx);
         self.receive(ctx);
+        if self.inventory_enabled
+            && !self.inventory_pending
+            && self
+                .inventory_polled_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+        {
+            self.refresh_inventory(ctx);
+        }
         if ctx.input(|i| i.viewport().close_requested()) && self.live_running {
             self.live_stop.store(true, Ordering::Relaxed);
             self.close_after_live = true;
@@ -1792,6 +1890,9 @@ impl GreenSuite {
             Window::new("Source record")
                 .open(&mut open)
                 .default_width(540.)
+                .default_height(400.)
+                .max_height((ctx.content_rect().height() - 140.).max(200.))
+                .vscroll(true)
                 .show(ctx, |ui| {
                     ui.heading(format!("{} {}", reading_value(&reading), reading.unit));
                     ui.label(format!(
@@ -1800,14 +1901,22 @@ impl GreenSuite {
                     ));
                     ui.label(format!("Recorded: {}", reading.timestamp));
                     ui.label(format!("Source: {}", reading.source));
+                    self.review_measurement(ui, &reading);
                     ui.separator();
+                    if reading.raw.char_indices().nth(8192).is_some() {ui.label("Source preview is limited to 8,192 characters. Copy source record retains the complete value.");}
                     ScrollArea::vertical().max_height(260.).show(ui, |ui| {
                         ui.add(
                             Label::new(
                                 RichText::new(if reading.raw.is_empty() {
                                     "No raw source record."
                                 } else {
-                                    &reading.raw
+                                    let end = reading
+                                        .raw
+                                        .char_indices()
+                                        .nth(8192)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(reading.raw.len());
+                                    &reading.raw[..end]
                                 })
                                 .size(12.),
                             )
@@ -1825,6 +1934,7 @@ impl GreenSuite {
                 self.source_details = None;
             }
         }
+        self.stored_analysis_window(ctx);
         if self.dirty && self.last_save.elapsed() > Duration::from_secs(1) {
             self.save();
         }
@@ -1913,6 +2023,19 @@ fn live_reading(
             "display_value": channel.display_value,
         })
         .to_string(),
+        metadata: Some(crate::measurement::Metadata {
+            original_numeric: Some(channel.display_value.clone()),
+            original_unit: Some(channel.unit.clone()),
+            sensor_address: Some(module.address),
+            channel: Some((index + 1) as u16),
+            time_basis: if channel.device_timestamp.is_some() {
+                crate::measurement::TimeBasis::InstrumentLocal
+            } else {
+                crate::measurement::TimeBasis::PcUtc
+            },
+            received_at_utc: Some(channel.received_at.clone()),
+            ..Default::default()
+        }),
     }
 }
 
@@ -2006,6 +2129,17 @@ fn live_trend(ui: &mut Ui, channel: &LiveChannel) {
 }
 
 fn reading_value(reading: &Reading) -> String {
+    if let Some(display) = reading
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.original_numeric.as_deref())
+        && display.len() <= 80
+        && display
+            .parse::<f64>()
+            .is_ok_and(|value| value.is_finite() && value == reading.value)
+    {
+        return display.to_owned();
+    }
     if reading.source == "wrist-reporter-live"
         && let Ok(raw) = serde_json::from_str::<serde_json::Value>(&reading.raw)
         && let Some(display) = raw["display_value"].as_str()
@@ -2016,7 +2150,34 @@ fn reading_value(reading: &Reading) -> String {
     {
         return display.to_owned();
     }
-    reading.value.to_string()
+    if reading
+        .metadata
+        .as_ref()
+        .is_some_and(|m| m.origin == crate::measurement::Origin::ApplicationCalculated)
+    {
+        calculated_value(reading.value)
+    } else {
+        reading.value.to_string()
+    }
+}
+
+fn calculated_value(value: f64) -> String {
+    if !value.is_finite() {
+        return "Unavailable".into();
+    }
+    if value == 0. {
+        return "0".into();
+    }
+    if value.abs() < 1e-6 || value.abs() >= 1e9 {
+        return format!("{value:.8e}");
+    }
+    let decimals = (8. - value.abs().log10().floor()).clamp(0., 12.) as usize;
+    let text = format!("{value:.decimals$}");
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        text
+    }
 }
 
 fn serif_bold(size: f32) -> FontId {
@@ -2096,6 +2257,7 @@ fn new_traverse() -> Traverse {
         rows: 3,
         columns: 4,
         velocities: vec![None; 12],
+        sample_sources: Vec::new(),
         point_id: None,
     }
 }
@@ -2135,6 +2297,7 @@ fn example_project() -> Project {
             unit: unit.into(),
             source: "example".into(),
             raw: "Example data; not an instrument measurement.".into(),
+            metadata: None,
         });
         p.points.push(MapPoint {
             id: format!("example-point-{i}"),
