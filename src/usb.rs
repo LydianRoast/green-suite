@@ -8,13 +8,12 @@
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{NaiveDate, Utc};
 use serde_json::json;
-use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
+use serialport::{ClearBuffer, SerialPort};
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
 use crate::model::Reading;
 
-const BAUD: u32 = 230_400;
 const MAX_GROUPS: u32 = 10_000;
 const MAX_RECORDS: u32 = 1_000_000;
 
@@ -52,6 +51,37 @@ pub fn list_ports() -> Result<Vec<String>> {
 
 pub fn probe(port: &str) -> Result<DeviceInfo> {
     Session::open(port)?.device_info(port)
+}
+
+/// Preserves identification traffic even when the Reporter does not answer.
+/// The caller owns the private capture destination; existing evidence is never
+/// replaced. Only the same read-only metadata queries as `probe` are sent.
+pub fn probe_logged(port: &str, raw_path: &std::path::Path) -> Result<DeviceInfo> {
+    let mut log = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(raw_path)
+        .context("Creating identification capture without replacing existing evidence")?;
+    writeln!(
+        log,
+        "{}",
+        json!({"Event":"ProbeOpening", "TimestampUtc":Utc::now().to_rfc3339(), "Port":port})
+    )?;
+    let result = match Session::open(port) {
+        Ok(mut session) => {
+            let result = session.device_info(port);
+            log.write_all(session.raw_log.as_bytes())?;
+            result
+        }
+        Err(error) => Err(error),
+    };
+    writeln!(
+        log,
+        "{}",
+        json!({"Event":"ProbeEnded", "TimestampUtc":Utc::now().to_rfc3339(), "Error":result.as_ref().err().map(|error| format!("{error:#}"))})
+    )?;
+    log.sync_all()?;
+    result
 }
 
 /// Downloads using the device's read cursor only. Never erases records, changes
@@ -261,6 +291,13 @@ enum Query {
 }
 
 impl Query {
+    fn is_metadata(self) -> bool {
+        matches!(
+            self,
+            Self::Status | Self::Firmware | Self::Identity | Self::GroupCount | Self::RecordCount
+        )
+    }
+
     fn wire(self) -> (Vec<u8>, u8) {
         match self {
             Self::Status => (vec![0x30, 0x00], 0x01),
@@ -283,21 +320,34 @@ struct Session {
     unverified_checksums: usize,
 }
 
+fn metadata_retry<T>(query: Query, mut operation: impl FnMut(usize) -> Result<T>) -> Result<T> {
+    let attempts = if query.is_metadata() { 3 } else { 1 };
+    for attempt in 0..attempts {
+        match operation(attempt) {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let timeout = error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    )
+                });
+                if !timeout || attempt + 1 == attempts {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    unreachable!("At least one operation is always attempted")
+}
+
 impl Session {
     fn open(name: &str) -> Result<Self> {
-        let mut port = serialport::new(name, BAUD)
-            .data_bits(DataBits::Eight)
-            .parity(Parity::None)
-            .stop_bits(StopBits::One)
-            .flow_control(FlowControl::None)
-            .dtr_on_open(false)
-            .timeout(Duration::from_millis(1500))
-            .open()
-            .with_context(|| format!("Opening {name}; close other applications using this port"))?;
-        port.write_data_terminal_ready(false)
-            .context("Disabling DTR")?;
-        port.write_request_to_send(false).context("Disabling RTS")?;
+        let port = crate::connection::open(name, Duration::from_millis(1500))?;
         port.clear(ClearBuffer::Input)?;
+        // Opening the VCP enables/configures the bridge UART. Allow that
+        // transition to settle before the first Reporter protocol query.
+        std::thread::sleep(Duration::from_millis(500));
         Ok(Self {
             port,
             raw_log: String::new(),
@@ -307,6 +357,20 @@ impl Session {
     }
 
     fn query(&mut self, query: Query, label: &str) -> Result<Vec<u8>> {
+        metadata_retry(query, |attempt| {
+            if attempt > 0 {
+                // Only idempotent metadata can reach this branch. Discard a
+                // late/partial response before issuing that same query again.
+                std::thread::sleep(Duration::from_millis(250));
+                self.port
+                    .clear(ClearBuffer::Input)
+                    .context("Clearing stale metadata response")?;
+            }
+            self.query_once(query, label)
+        })
+    }
+
+    fn query_once(&mut self, query: Query, label: &str) -> Result<Vec<u8>> {
         let (payload, expected) = query.wire();
         let tx = encode_frame(&payload)?;
         self.port
@@ -335,8 +399,13 @@ impl Session {
         }
         self.raw_log.push_str(&serde_json::to_string(&entry)?);
         self.raw_log.push('\n');
-        let response = response
-            .with_context(|| format!("Reading {label}; cursor commands are not retried"))?;
+        let response = response.with_context(|| {
+            if query.is_metadata() {
+                format!("Reading {label}; device metadata did not arrive")
+            } else {
+                format!("Reading {label}; cursor command was not retried to avoid skipping stored records")
+            }
+        })?;
         ensure!(
             response.checksum_mode != "unverified"
                 || matches!(query, Query::FirstRecord(_) | Query::NextRecord),
@@ -427,7 +496,7 @@ fn escape(output: &mut Vec<u8>, byte: u8) {
     }
 }
 
-fn encode_frame(payload: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn encode_frame(payload: &[u8]) -> Result<Vec<u8>> {
     ensure!(
         !payload.is_empty() && payload.len() <= 255,
         "Invalid outgoing payload length"
@@ -616,6 +685,110 @@ fn measurement_kind(unit: &str) -> &'static str {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    #[ignore = "requires an explicitly authorized Reporter and private capture path"]
+    fn diagnostic_metadata_exchange() {
+        let port = std::env::var("GREEN_SUITE_DIAGNOSTIC_PORT").expect("Set the authorized port");
+        let path = std::env::var("GREEN_SUITE_DIAGNOSTIC_CAPTURE")
+            .expect("Set a new private capture file");
+        let mut capture = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut session = Session::open(&port).unwrap();
+        let mut outcomes = Vec::new();
+        for (query, label) in [
+            (Query::Firmware, "Diagnostic firmware revision"),
+            (Query::Identity, "Diagnostic identity"),
+            (Query::GroupCount, "Diagnostic group count"),
+            (Query::RecordCount, "Diagnostic record count"),
+            (Query::Status, "Diagnostic status"),
+        ] {
+            assert!(query.is_metadata());
+            let result = session.query_once(query, label);
+            outcomes.push(json!({"query":label, "valid_response":result.is_ok(), "error":result.err().map(|e| format!("{e:#}"))}));
+        }
+        capture.write_all(session.raw_log.as_bytes()).unwrap();
+        writeln!(
+            capture,
+            "{}",
+            json!({"Event":"MetadataDiagnosticSummary", "outcomes":outcomes})
+        )
+        .unwrap();
+        capture.sync_all().unwrap();
+        println!("{}", json!({"outcomes":outcomes}));
+    }
+
+    #[test]
+    fn failed_probe_keeps_diagnostics_and_cannot_replace_existing_capture() {
+        let path = std::env::temp_dir().join(format!(
+            "green-suite-probe-test-{}.ndjson",
+            uuid::Uuid::new_v4()
+        ));
+        let absent_port = format!("green-suite-absent-{}", uuid::Uuid::new_v4());
+        assert!(probe_logged(&absent_port, &path).is_err());
+        let before = std::fs::read(&path).unwrap();
+        let entries: Vec<serde_json::Value> = std::str::from_utf8(&before)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries[0]["Event"], "ProbeOpening");
+        assert_eq!(entries.last().unwrap()["Event"], "ProbeEnded");
+        assert!(entries.last().unwrap()["Error"].is_string());
+        assert!(probe_logged(&absent_port, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn only_metadata_timeouts_are_retried() {
+        let mut calls = 0;
+        let value = metadata_retry(Query::Status, |_| {
+            calls += 1;
+            if calls == 1 {
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+        assert_eq!((calls, value), (2, 42));
+        for query in [
+            Query::FirstGroup,
+            Query::NextGroup,
+            Query::FirstRecord(*b"AA"),
+            Query::NextRecord,
+        ] {
+            let mut calls = 0;
+            let result: Result<()> = metadata_retry(query, |_| {
+                calls += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+            });
+            assert!(result.is_err());
+            assert_eq!(calls, 1, "A cursor operation must never be replayed");
+        }
+    }
+
+    #[test]
+    fn metadata_recovery_is_bounded_and_rejects_non_timeout_errors() {
+        let mut calls = 0;
+        let result: Result<()> = metadata_retry(Query::Identity, |_| {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 3);
+        let mut calls = 0;
+        let result: Result<()> = metadata_retry(Query::Status, |_| {
+            calls += 1;
+            Err(anyhow!("Invalid checksum"))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
 
     fn bytes(text: &str) -> Vec<u8> {
         text.split_whitespace()

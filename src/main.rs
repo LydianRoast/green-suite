@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Kevin R. Whiteman. All rights reserved.
 mod app;
 mod appearance;
+mod connection;
+mod headless;
+mod live;
 mod model;
 mod pdf;
 mod traverse;
@@ -19,12 +22,48 @@ fn main() -> Result<()> {
     };
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Green Suite\n\nRun without arguments for the native GUI.\n  --project PATH           Open a saved project\n  --probe COM5             Read USB device information\n  --download COM5 --out DIR Download stored readings and raw packets\n  --pdf-check PATH          Inspect and render a PDF's first page\n  --demo                   Open the clearly labeled example project\n  --view traverse|readings  Select initial view\n  --screenshot PATH        Save a GUI screenshot and exit"
+            "Green Suite\n\nRun without arguments for the native GUI.\n  --project PATH           Open a saved project\n  --probe COM5 [--out DIR] Read USB device information; optionally save diagnostics\n  --download COM5 --out DIR Download stored readings and raw packets\n  --capture-live COM5 --seconds N --out DIR\n                           Record a bounded live USB session\n  --pdf-check PATH          Inspect and render a PDF's first page\n  --demo                   Open the clearly labeled example project\n  --view traverse|readings|live\n                           Select initial view\n  --screenshot PATH        Save a GUI screenshot and exit\n  --preview-ui PATH        Render a windowless UI preview\n  --size WIDTHxHEIGHT      Preview dimensions (default 1280x800)\n  --theme dark|light       Preview appearance\n  --palette evergreen|urbane\n                           Preview color scheme"
+        );
+        return Ok(());
+    }
+    if let Some(output) = option("--preview-ui") {
+        let size = option("--size").unwrap_or_else(|| "1280x800".into());
+        let (width, height) = size
+            .split_once('x')
+            .context("--size requires WIDTHxHEIGHT")?;
+        let width: u32 = width.parse().context("Invalid preview width")?;
+        let height: u32 = height.parse().context("Invalid preview height")?;
+        anyhow::ensure!(
+            (1000..=3840).contains(&width) && (600..=2160).contains(&height),
+            "Preview size must be 1000–3840 by 600–2160 pixels"
+        );
+        let ctx = eframe::egui::Context::default();
+        let mut app = app::GreenSuite::preview(
+            &ctx,
+            &option("--view").unwrap_or_default(),
+            option("--theme").as_deref() == Some("dark"),
+            appearance::Scheme::from_key(&option("--palette").unwrap_or_default()),
+            args.iter().any(|arg| arg == "--demo"),
+        );
+        headless::render_png(&ctx, width, height, &PathBuf::from(&output), |ctx| {
+            app.ui(ctx)
+        })?;
+        println!(
+            "{}",
+            serde_json::json!({"preview":output,"width":width,"height":height,"headless":true})
         );
         return Ok(());
     }
     if let Some(port) = option("--probe") {
-        let d = usb::probe(&port)?;
+        let d = if let Some(out) = option("--out") {
+            let out = PathBuf::from(out);
+            std::fs::create_dir_all(&out)?;
+            let path = out.join(format!("probe-{}.raw.ndjson", uuid::Uuid::new_v4()));
+            eprintln!("Identification capture: {}", path.display());
+            usb::probe_logged(&port, &path)?
+        } else {
+            usb::probe(&port)?
+        };
         println!(
             "{}",
             serde_json::to_string_pretty(
@@ -74,6 +113,70 @@ fn main() -> Result<()> {
             "Download is incomplete; partial measurements and raw packets were saved."
         );
         return Ok(());
+    }
+    if let Some(port) = option("--capture-live") {
+        use std::cell::{Cell, RefCell};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let seconds: u64 = option("--seconds")
+            .context("--capture-live requires --seconds (1 to 3600)")?
+            .parse()
+            .context("--seconds must be an integer")?;
+        anyhow::ensure!(
+            (1..=3600).contains(&seconds),
+            "--seconds must be between 1 and 3600"
+        );
+        let out =
+            PathBuf::from(option("--out").context("--capture-live requires --out DIRECTORY")?);
+        let device = usb::probe(&port)?;
+        anyhow::ensure!(
+            device.firmware.trim() == "Rev. 1.04Y6",
+            "Live USB is currently validated only for Rev. 1.04Y6"
+        );
+        std::fs::create_dir_all(&out)?;
+        let raw_path = out.join(format!("live-{}.raw.ndjson", uuid::Uuid::new_v4()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let deadline_stop = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            deadline_stop.store(true, Ordering::Release);
+        });
+        let samples = Cell::new(0usize);
+        let latest = RefCell::new(None);
+        let warnings = RefCell::new(Vec::new());
+        let mode_changed = Cell::new(false);
+        let result = live::monitor(&port, &raw_path, stop, |event| match event {
+            live::LiveEvent::Sample(sample) => {
+                samples.set(samples.get() + 1);
+                *latest.borrow_mut() = Some(sample);
+            }
+            live::LiveEvent::Warning(warning) => warnings.borrow_mut().push(warning),
+            live::LiveEvent::SessionChanged => mode_changed.set(true),
+            live::LiveEvent::Modules(_) => {}
+        })
+        .and_then(|()| {
+            anyhow::ensure!(
+                samples.get() > 0,
+                "No validated live measurements arrived; the raw capture was retained"
+            );
+            Ok(())
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "samples": samples.get(), "latest":latest.into_inner(), "warnings":warnings.into_inner(),
+                "raw_capture":raw_path, "session_changed":mode_changed.get(),
+                "device_mode_restored":false, "error":result.as_ref().err().map(|e| format!("{e:#}"))
+            }))?
+        );
+        if mode_changed.get() {
+            eprintln!(
+                "Reception ended. To return to normal use, turn sensors off, restart the Reporter, then turn sensors on."
+            );
+        }
+        return result;
     }
     if let Some(path) = option("--pdf-check") {
         let doc = pdf::PdfDocument::open(std::path::Path::new(&path))?;

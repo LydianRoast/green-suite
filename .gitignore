@@ -2,6 +2,7 @@
 /workspace/
 /captures/
 /Green Suite.exe
+/Green Suite.updated.exe
 /Green Suite.lnk
 *.green-suite.json
 *.raw.ndjson

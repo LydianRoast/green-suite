@@ -223,6 +223,7 @@ pub struct TraverseView {
     animation_time: f64,
     clear_confirmation: bool,
     jump_to_samples: bool,
+    show_coordinates: bool,
 }
 
 impl Default for TraverseView {
@@ -240,6 +241,7 @@ impl Default for TraverseView {
             animation_time: 0.0,
             clear_confirmation: false,
             jump_to_samples: false,
+            show_coordinates: false,
         }
     }
 }
@@ -304,13 +306,13 @@ impl TraverseView {
                 self.diagram(&mut columns[0], traverse, diagram_height);
                 changed |= self.configuration(&mut columns[1], traverse);
                 columns[1].add_space(12.0);
-                changed |= self.reading_picker(&mut columns[1], traverse, readings);
+                changed |= self.saved_readings(&mut columns[1], traverse, readings);
             });
         } else {
             self.diagram(ui, traverse, diagram_height);
             ui.add_space(10.0);
             changed |= self.configuration(ui, traverse);
-            changed |= self.reading_picker(ui, traverse, readings);
+            changed |= self.saved_readings(ui, traverse, readings);
         }
         ui.add_space(14.0);
         changed |= self.sample_table(ui, traverse);
@@ -324,19 +326,20 @@ impl TraverseView {
                 egui::Frame::new().fill(colors.panel)
                     .corner_radius(2.0).inner_margin(10.0).show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            metric(ui, "DUCT AREA", format!("{:.3} ft²", result.area_sq_ft));
+                            metric(ui, "Flow", result.flow_cfm.map(|value| format!("{value:.1} CFM")).unwrap_or_else(|| "— CFM".into()));
                             ui.separator();
-                            metric(ui, if result.filled < result.total { "PARTIAL MEAN" } else { "MEAN VELOCITY" },
-                                result.mean_fpm.map(|value| format!("{value:.1} fpm")).unwrap_or_else(|| "— fpm".into()));
-                            ui.separator();
-                            metric(ui, "VOLUME FLOW", result.flow_cfm.map(|value| format!("{value:.1} CFM")).unwrap_or_else(|| "Awaiting samples".into()));
-                            ui.separator();
-                            metric(ui, "CAPTURED", format!("{} / {}", result.filled, result.total));
+                            metric(ui, "Samples", format!("{} / {}", result.filled, result.total));
                         });
                         if result.filled < result.total {
-                            ui.add_space(6.0);
-                            ui.small("Flow is calculated after every point has a valid velocity. Blank points are not zero.");
+                            ui.small(format!("{} samples remaining", result.total - result.filled));
                         }
+                        ui.collapsing("Calculation details", |ui| {
+                            ui.label(format!("Area: {:.3} ft²", result.area_sq_ft));
+                            ui.label(format!("{}: {}",
+                                if result.filled < result.total { "Partial mean" } else { "Mean velocity" },
+                                result.mean_fpm.map(|value| format!("{value:.1} fpm")).unwrap_or_else(|| "— fpm".into())));
+                            ui.small("Flow requires every point. Blank points are unmeasured; zero is a valid velocity.");
+                        });
                     });
             }
             Err(error) => {
@@ -350,9 +353,7 @@ impl TraverseView {
         let colors = Palette::for_ui(ui);
         egui::Frame::new().stroke(Stroke::new(1.0, colors.border)).corner_radius(2.0)
             .inner_margin(14.0).show(ui, |ui| {
-                ui.strong("Sampling configuration");
-                ui.label(egui::RichText::new("EQUAL-AREA SAMPLING").small().strong().color(colors.green));
-                ui.add_space(8.0);
+                ui.strong("Layout");
                 let draft = self.draft.as_mut().unwrap();
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut draft.shape, "Rectangular".to_string(), "Rectangular");
@@ -388,7 +389,7 @@ impl TraverseView {
                 ui.add_space(8.0);
                 let has_changes = *draft != Layout::from_traverse(traverse)
                     || traverse.velocities.len() != traverse.rows.saturating_mul(traverse.columns);
-                if ui.add_enabled(has_changes, egui::Button::new("Apply sampling layout")).clicked() {
+                if ui.add_enabled(has_changes, egui::Button::new("Apply layout")).clicked() {
                     if traverse.velocities.iter().any(Option::is_some) {
                         self.pending_layout = Some(draft.clone());
                     } else {
@@ -396,7 +397,7 @@ impl TraverseView {
                         changed = true;
                     }
                 }
-                ui.collapsing("About the sampling layout", |ui| {
+                ui.collapsing("Layout notes", |ui| {
                     ui.label(egui::RichText::new(if circular(&draft.shape) {
                         "Each annular sector has equal area. Points use the midpoint in area of each ring and the sector midpoint."
                     } else {
@@ -430,6 +431,25 @@ impl TraverseView {
         changed
     }
 
+    fn saved_readings(
+        &mut self,
+        ui: &mut egui::Ui,
+        traverse: &mut Traverse,
+        readings: &[Reading],
+    ) -> bool {
+        if !readings
+            .iter()
+            .any(|reading| velocity_to_fpm(reading.value, &reading.unit).is_some())
+        {
+            return false;
+        }
+        ui.collapsing("Use saved velocity readings", |ui| {
+            self.reading_picker(ui, traverse, readings)
+        })
+        .body_returned
+        .unwrap_or(false)
+    }
+
     fn reading_picker(
         &mut self,
         ui: &mut egui::Ui,
@@ -446,7 +466,7 @@ impl TraverseView {
             .iter()
             .find(|reading| Some(&reading.id) == self.reading_id.as_ref())
             .copied();
-        ui.strong(format!("Point {:02} · assign a reading", self.selected + 1));
+        ui.strong(format!("Point {:02}", self.selected + 1));
         if compatible.is_empty() {
             ui.label(
                 egui::RichText::new(
@@ -518,10 +538,7 @@ impl TraverseView {
         ui.horizontal_wrapped(|ui| {
             let valid_target = self.selected < traverse.velocities.len();
             if ui
-                .add_enabled(
-                    value.is_some() && valid_target,
-                    egui::Button::new("Assign to point"),
-                )
+                .add_enabled(value.is_some() && valid_target, egui::Button::new("Assign"))
                 .clicked()
             {
                 traverse.velocities[self.selected] = value;
@@ -540,9 +557,7 @@ impl TraverseView {
             }
         });
         if let Some(value) = value {
-            ui.small(format!(
-                "Assigned velocity: {value:.2} fpm. Source reading remains in the explorer."
-            ));
+            ui.small(format!("Selected: {value:.2} fpm"));
         }
         if changed {
             self.sync_inputs(traverse);
@@ -555,16 +570,13 @@ impl TraverseView {
         let colors = Palette::for_ui(ui);
         let positions = point_positions(traverse);
         ui.horizontal_wrapped(|ui| {
-            let heading = ui.strong("Point velocities");
+            let heading = ui.strong("Samples · fpm");
             if self.jump_to_samples {
                 heading.scroll_to_me(Some(egui::Align::TOP));
                 self.jump_to_samples = false;
             }
-            ui.label(
-                egui::RichText::new("fpm · click a point to select it")
-                    .small()
-                    .color(colors.muted),
-            );
+            ui.checkbox(&mut self.show_coordinates, "Coordinates")
+                .on_hover_text("Show each point's row or ring and its X / Y position in inches.");
             if ui
                 .add_enabled(
                     traverse.velocities.iter().any(Option::is_some)
@@ -601,12 +613,14 @@ impl TraverseView {
                     .min_col_width(70.0)
                     .show(ui, |ui| {
                         ui.strong("Point");
-                        ui.strong(if circular(&traverse.shape) {
-                            "Ring / sector"
-                        } else {
-                            "Row / column"
-                        });
-                        ui.strong("X / Y (in)");
+                        if self.show_coordinates {
+                            ui.strong(if circular(&traverse.shape) {
+                                "Ring / sector"
+                            } else {
+                                "Row / column"
+                            });
+                            ui.strong("X / Y (in)");
+                        }
                         ui.strong("Velocity (fpm)");
                         ui.strong("Status");
                         ui.end_row();
@@ -623,26 +637,28 @@ impl TraverseView {
                             {
                                 self.selected = index;
                             }
-                            ui.label(format!(
-                                "{} / {}",
-                                index / traverse.columns + 1,
-                                index % traverse.columns + 1
-                            ));
-                            let width = if circular(&traverse.shape) {
-                                traverse.diameter
-                            } else {
-                                traverse.width
-                            };
-                            let height = if circular(&traverse.shape) {
-                                traverse.diameter
-                            } else {
-                                traverse.height
-                            };
-                            ui.label(format!(
-                                "{:.2} / {:.2}",
-                                position[0] as f64 * width,
-                                position[1] as f64 * height
-                            ));
+                            if self.show_coordinates {
+                                ui.label(format!(
+                                    "{} / {}",
+                                    index / traverse.columns + 1,
+                                    index % traverse.columns + 1
+                                ));
+                                let width = if circular(&traverse.shape) {
+                                    traverse.diameter
+                                } else {
+                                    traverse.width
+                                };
+                                let height = if circular(&traverse.shape) {
+                                    traverse.diameter
+                                } else {
+                                    traverse.height
+                                };
+                                ui.label(format!(
+                                    "{:.2} / {:.2}",
+                                    position[0] as f64 * width,
+                                    position[1] as f64 * height
+                                ));
+                            }
                             let edit = ui.add(
                                 egui::TextEdit::singleline(&mut self.input_values[index])
                                     .desired_width(110.0)
@@ -677,7 +693,9 @@ impl TraverseView {
                         }
                     });
             });
-        ui.small("X and Y are measured from the top-left of the duct bounding box. Zero is a valid measured velocity.");
+        if self.show_coordinates {
+            ui.small("X / Y are measured from the top-left of the duct bounding box.");
+        }
         changed
     }
 
@@ -685,18 +703,22 @@ impl TraverseView {
         let colors = Palette::for_ui(ui);
         let font_family = egui::TextStyle::Body.resolve(ui.style()).family;
         ui.horizontal_wrapped(|ui| {
-            ui.strong("Duct velocity profile");
+            ui.strong("Velocity profile");
             if ui
                 .button(if self.running {
-                    "Pause motion"
+                    "Pause"
                 } else {
-                    "Resume motion"
+                    "Animate"
                 })
                 .clicked()
             {
                 self.running = !self.running;
             }
-            ui.checkbox(&mut self.reduced_motion, "Reduced motion");
+            ui.menu_button("View", |ui| {
+                ui.checkbox(&mut self.reduced_motion, "Reduced motion");
+                ui.separator();
+                ui.label("Motion is illustrative. Shading represents measured velocity; empty cells are unmeasured.");
+            });
         });
         let animate = self.running && !self.reduced_motion;
         if animate {
@@ -878,13 +900,13 @@ impl TraverseView {
         );
         ui.horizontal_wrapped(|ui| {
             for (color, label) in [
-                (colors.heat_low, "Lower".to_string()),
+                (colors.heat_low, "Low".to_string()),
                 (
                     colors.heat_high,
                     match measured_max {
-                        Some(value) if value > 0.0 => format!("Higher · scale 0–{value:.0} fpm"),
-                        Some(_) => "All measured velocities: 0 fpm".to_string(),
-                        None => "Awaiting measured velocities".to_string(),
+                        Some(value) if value > 0.0 => format!("High · 0–{value:.0} fpm"),
+                        Some(_) => "0 fpm".to_string(),
+                        None => "No samples".to_string(),
                     },
                 ),
             ] {
@@ -898,11 +920,9 @@ impl TraverseView {
                 );
                 ui.small(label);
             }
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Illustrative flow · measured cell colors").small().color(colors.muted))
-                .on_hover_text("Animation is illustrative. Cell colors represent captured velocity; empty cells are unmeasured.");
-            if ui.small_button("Edit velocities ↓").clicked() { self.jump_to_samples = true; }
+            if ui.small_button("Edit samples ↓").clicked() {
+                self.jump_to_samples = true;
+            }
         });
     }
 

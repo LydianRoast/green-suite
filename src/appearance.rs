@@ -65,84 +65,59 @@ const fn rgb(hex: u32) -> Color32 {
 
 impl Palette {
     fn new(dark: bool, scheme: Scheme) -> Self {
-        // Website tokens: https://evergreentelemetry.com/ (2026-10-22).
-        // #00955A, #01613B, #51565A, #0F1728, #EDF0EF and white are site colors.
-        // Urbane adds a muted complementary plum to the green, with warm paper
-        // and walnut neutrals. Other shades adapt these roles for contrast.
+        // The emblem and Evergreen actions retain observed website greens.
+        // Surfaces are neutral black, white and gray. Saturated foreground
+        // accents carry the scheme without tinted paper or pastel chart fills.
         let brand = rgb(0x00955A);
-        let action = rgb(0x01613B);
-        match (scheme, dark) {
-            (Scheme::Evergreen, false) => Self {
-                green: action,
-                ink: rgb(0x0F1728),
-                muted: rgb(0x51565A),
-                line: rgb(0x697E71),
+        let action = match scheme {
+            Scheme::Evergreen => rgb(0x01613B),
+            Scheme::Urbane => rgb(0x4B007D),
+        };
+        let accent = match (scheme, dark) {
+            (Scheme::Evergreen, false) => rgb(0x004127),
+            (Scheme::Evergreen, true) => rgb(0x00EF83),
+            (Scheme::Urbane, false) => rgb(0x4B007D),
+            (Scheme::Urbane, true) => rgb(0xFF00FF),
+        };
+        match dark {
+            false => Self {
+                green: accent,
+                ink: Color32::BLACK,
+                muted: rgb(0x303030),
+                line: Color32::BLACK,
                 paper: Color32::WHITE,
-                panel: rgb(0xEDF0EF),
+                panel: Color32::WHITE,
                 action,
-                selection: rgb(0xCEE0D2),
-                alternate: rgb(0xE1E9E4),
-                canvas: rgb(0xE2E9E4),
-                grid: rgb(0x91A99A),
-                warning: rgb(0x774713),
-                secondary: rgb(0x784A5D),
+                selection: rgb(0xE0E0E0),
+                alternate: rgb(0xF2F2F2),
+                canvas: Color32::WHITE,
+                grid: rgb(0x505050),
+                warning: rgb(0x700000),
+                secondary: match scheme {
+                    Scheme::Evergreen => rgb(0x4B007D),
+                    Scheme::Urbane => rgb(0x004127),
+                },
                 brand,
-                heat_low: rgb(0xE2ECDD),
-                heat_high: rgb(0xA6CAB5),
+                heat_low: Color32::WHITE,
+                heat_high: rgb(0xC6C6C6),
             },
-            (Scheme::Evergreen, true) => Self {
-                green: rgb(0x82CEAD),
-                ink: rgb(0xEDF0EF),
-                muted: rgb(0xB1C0B8),
-                line: rgb(0x74877A),
-                paper: rgb(0x151D19),
-                panel: rgb(0x1C2822),
+            true => Self {
+                green: accent,
+                ink: Color32::WHITE,
+                muted: rgb(0xDDDDDD),
+                line: Color32::WHITE,
+                paper: Color32::BLACK,
+                panel: rgb(0x050505),
                 action,
-                selection: rgb(0x304B3D),
-                alternate: rgb(0x27382F),
-                canvas: rgb(0x111C17),
-                grid: rgb(0x758F7D),
-                warning: rgb(0xFEC84B),
-                secondary: rgb(0xD7B77A),
+                selection: rgb(0x1A1A1A),
+                alternate: rgb(0x101010),
+                canvas: Color32::BLACK,
+                grid: rgb(0x777777),
+                warning: rgb(0xFFCC00),
+                secondary: rgb(0xFFCC00),
                 brand,
-                heat_low: rgb(0x243C2F),
-                heat_high: rgb(0x426E55),
-            },
-            (Scheme::Urbane, false) => Self {
-                green: action,
-                ink: rgb(0x302B29),
-                muted: rgb(0x635545),
-                line: rgb(0x88745A),
-                paper: rgb(0xF2E8D5),
-                panel: rgb(0xE9DEC8),
-                action,
-                selection: rgb(0xDACAD2),
-                alternate: rgb(0xE6D8C1),
-                canvas: rgb(0xE0D4BF),
-                grid: rgb(0x9F8F75),
-                warning: rgb(0x774713),
-                secondary: rgb(0x784A5D),
-                brand,
-                heat_low: rgb(0xDFE4D0),
-                heat_high: rgb(0xA4B899),
-            },
-            (Scheme::Urbane, true) => Self {
-                green: rgb(0x76C9A6),
-                ink: rgb(0xF2E8D5),
-                muted: rgb(0xC1B69F),
-                line: rgb(0x978366),
-                paper: rgb(0x262521),
-                panel: rgb(0x32312B),
-                action,
-                selection: rgb(0x4C3941),
-                alternate: rgb(0x3F3A31),
-                canvas: rgb(0x211F1B),
-                grid: rgb(0x8E805F),
-                warning: rgb(0xD6B477),
-                secondary: rgb(0xCBA3B3),
-                brand,
-                heat_low: rgb(0x363D31),
-                heat_high: rgb(0x526040),
+                heat_low: rgb(0x080808),
+                heat_high: rgb(0x343434),
             },
         }
     }
@@ -180,12 +155,12 @@ pub fn apply(ctx: &egui::Context, dark: bool, scheme: Scheme) {
     style.visuals.faint_bg_color = colors.alternate;
     style.visuals.hyperlink_color = colors.green;
     style.visuals.warn_fg_color = colors.warning;
-    style.visuals.error_fg_color = if dark { rgb(0xEDB6A6) } else { rgb(0x8D342E) };
+    style.visuals.error_fg_color = if dark { rgb(0xFF4444) } else { rgb(0x8B0000) };
     style.visuals.selection.bg_fill = colors.selection;
-    style.visuals.selection.stroke = Stroke::new(1.0, colors.ink);
-    style.visuals.window_corner_radius = CornerRadius::same(2);
-    style.visuals.menu_corner_radius = CornerRadius::same(2);
-    style.visuals.window_stroke = Stroke::new(1.0, colors.line);
+    style.visuals.selection.stroke = Stroke::new(2.0, colors.green);
+    style.visuals.window_corner_radius = CornerRadius::ZERO;
+    style.visuals.menu_corner_radius = CornerRadius::ZERO;
+    style.visuals.window_stroke = Stroke::new(1.5, colors.line);
     style.visuals.window_shadow = egui::epaint::Shadow::NONE;
     style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
     for widget in [
@@ -198,7 +173,7 @@ pub fn apply(ctx: &egui::Context, dark: bool, scheme: Scheme) {
         widget.weak_bg_fill = colors.alternate;
         widget.bg_stroke = Stroke::new(1.0, colors.line);
         widget.fg_stroke = Stroke::new(1.4, colors.ink);
-        widget.corner_radius = CornerRadius::same(2);
+        widget.corner_radius = CornerRadius::ZERO;
         widget.expansion = 0.0;
     }
     for widget in [
@@ -208,28 +183,28 @@ pub fn apply(ctx: &egui::Context, dark: bool, scheme: Scheme) {
     ] {
         widget.bg_fill = colors.selection;
         widget.weak_bg_fill = colors.selection;
-        widget.bg_stroke = Stroke::new(1.0, colors.secondary);
+        widget.bg_stroke = Stroke::new(2.0, colors.green);
     }
     style.visuals.widgets.noninteractive.bg_fill = colors.panel;
     style.visuals.widgets.noninteractive.weak_bg_fill = colors.panel;
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, colors.line);
     style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, colors.muted);
-    style.visuals.widgets.noninteractive.corner_radius = CornerRadius::same(2);
-    style.spacing.item_spacing = vec2(8.0, 8.0);
-    style.spacing.button_padding = vec2(11.0, 7.0);
+    style.visuals.widgets.noninteractive.corner_radius = CornerRadius::ZERO;
+    style.spacing.item_spacing = vec2(10.0, 10.0);
+    style.spacing.button_padding = vec2(12.0, 6.0);
     style.spacing.scroll = egui::style::ScrollStyle::solid();
     let bold = |size| FontId::new(size, FontFamily::Name("Serif Bold".into()));
     style
         .text_styles
-        .insert(TextStyle::Body, FontId::proportional(14.0));
-    style.text_styles.insert(TextStyle::Button, bold(13.0));
-    style.text_styles.insert(TextStyle::Heading, bold(24.0));
+        .insert(TextStyle::Body, FontId::monospace(14.0));
+    style.text_styles.insert(TextStyle::Button, bold(14.0));
+    style.text_styles.insert(TextStyle::Heading, bold(22.0));
     style
         .text_styles
-        .insert(TextStyle::Small, FontId::proportional(12.0));
+        .insert(TextStyle::Small, FontId::monospace(12.0));
     style
         .text_styles
-        .insert(TextStyle::Monospace, FontId::proportional(12.0));
+        .insert(TextStyle::Monospace, FontId::monospace(13.0));
     ctx.set_style(style);
 }
 
@@ -268,6 +243,10 @@ mod tests {
         for scheme in [Scheme::Evergreen, Scheme::Urbane] {
             for dark in [false, true] {
                 let p = Palette::new(dark, scheme);
+                for surface in [p.paper, p.panel, p.selection, p.alternate] {
+                    assert!(contrast(p.ink, surface) >= 12.0);
+                    assert!(contrast(p.muted, surface) >= 7.0);
+                }
                 for text in [p.ink, p.muted, p.green, p.secondary, p.warning] {
                     for surface in [p.paper, p.panel, p.selection, p.alternate] {
                         assert!(
@@ -276,13 +255,39 @@ mod tests {
                         );
                     }
                 }
-                assert!(contrast(Color32::WHITE, p.action) >= 4.5);
+                assert!(contrast(Color32::WHITE, p.action) >= 7.0);
                 assert!(contrast(p.paper, p.green) >= 4.5);
-                assert!(contrast(p.line, p.alternate) >= 3.0);
+                assert!(contrast(p.line, p.alternate) >= 7.0);
+                assert!(contrast(p.grid, p.canvas) >= 3.0);
                 for heat in [p.heat_low, p.heat_high] {
-                    assert!(contrast(p.ink, heat) >= 4.5);
+                    assert!(contrast(p.ink, heat) >= 7.0);
                     assert!(contrast(p.green, heat) >= 3.0);
                     assert!(contrast(p.secondary, heat) >= 3.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn interface_and_chart_surfaces_have_no_pastel_tints() {
+        for scheme in [Scheme::Evergreen, Scheme::Urbane] {
+            for dark in [false, true] {
+                let p = Palette::new(dark, scheme);
+                for surface in [
+                    p.paper,
+                    p.panel,
+                    p.selection,
+                    p.alternate,
+                    p.canvas,
+                    p.heat_low,
+                    p.heat_high,
+                ] {
+                    assert_eq!(surface.r(), surface.g());
+                    assert_eq!(surface.g(), surface.b());
+                }
+                assert_eq!(p.brand, rgb(0x00955A));
+                if scheme == Scheme::Evergreen {
+                    assert_eq!(p.action, rgb(0x01613B));
                 }
             }
         }

@@ -28,7 +28,20 @@ slash notation; the original license texts govern the respective components.
 | serialport | 4.10.1 | MPL-2.0 |
 | uuid | 1.28.0 | Apache-2.0 OR MIT |
 
-Green Suite also bundles unmodified **Source Serif 4 Semibold and Bold** static
+Green Suite bundles unmodified **Iosevka Slab Extended Semibold and Bold** static
+TrueType faces from the upstream [34.9.0 release](https://github.com/be5invis/Iosevka/releases/tag/v34.9.0),
+pinned to commit `2487637bb71f41b2a66134afd9faa6c316e5a438`.
+They are stored as `assets/fonts/IosevkaSlab-Semibold.ttf` and
+`assets/fonts/IosevkaSlab-Bold.ttf`; only the filenames have been shortened.
+The fonts' embedded names and binary contents are unchanged.
+The original release entries are `IosevkaSlab-ExtendedSemiBold.ttf` and
+`IosevkaSlab-ExtendedBold.ttf` in `PkgTTF-IosevkaSlab-34.9.0.zip`.
+Copyright 2015–2026 Renzhi Li. These faces retain the **SIL Open Font License
+1.1**, reproduced with the upstream notice in
+[assets/fonts/OFL-Iosevka.md](assets/fonts/OFL-Iosevka.md) and the aggregate
+license collection. They are separate from Green Suite's proprietary code.
+
+The repository also retains unmodified **Source Serif 4 Semibold and Bold** static
 TrueType fonts from Adobe's [4.005R release](https://github.com/adobe-fonts/source-serif/releases/tag/4.005R),
 version **4.005**, pinned to upstream commit
 `2823e993c53fca27c5c8749f529b56a5a7c77b6b`.

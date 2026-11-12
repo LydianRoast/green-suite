@@ -4,15 +4,20 @@ A measurement workspace for mechanical test and balance work.
 
 ## Workspace
 
-- **Blueprint map:** import a multipage mechanical PDF, switch sheets, pan and
+- **Plan:** import a multipage mechanical PDF, switch sheets, pan and
   zoom, and place or reposition supply, return, exhaust, duct traverse, valve,
   and pipe markers. Each marker stores its equipment/system, design value,
   units, notes, and attached measurements.
-- **Reading explorer:** connect a WR-401, inspect its identity and inventory,
+- **Readings:** connect a WR-401, inspect its identity and inventory,
   download stored records, filter measurements, inspect source records, and
   attach readings to drawing markers. Import Evergreen CSV exports or a
   long-form CSV; export normalized measurements as CSV.
-- **Traverse lab:** rectangular midpoint grids and circular equal-area annular
+- **Live:** receive pressure measurements from a linked SNE module over
+  USB, preserve the displayed decimals, inspect a recent trend and reading age,
+  and explicitly capture a reading into the project or a selected drawing point.
+  Initial live compatibility is WR-401 Rev. 1.04Y6 with one displayed pressure
+  channel per SNE module; other module families and layouts remain unverified.
+- **Traverse:** rectangular midpoint grids and circular equal-area annular
   sectors; editable velocity samples; assignment of downloaded velocity
   measurements; animated flow, sample selection, and a color field. Pause the
   animation when desired. Dimensions are inches and velocity is feet/minute;
@@ -23,14 +28,17 @@ A measurement workspace for mechanical test and balance work.
 
 ## Interface
 
-The interface provides Evergreen and Urbane palettes, each with Dark and Light
-modes. The palette and mode are remembered between launches. Bold serif type,
-ruled panels, and an original instrument engraving give the workspace a
-Frasurbane treatment. See [Interface design](DESIGN.md) for color sources.
-Keyboard focus, scrollable details, and direct access to drawings and readings
-remain available. The header and traverse diagram adapt to smaller windows.
-Measurement displays retain recorded numeric
-precision, and incomplete USB downloads remain clearly identified.
+The compact interface uses **Plan**, **Readings**, **Traverse**, and **Live**
+tabs. Drawing navigation and the point inspector appear in Plan; USB controls
+appear in Readings and Live. Setup instructions and secondary details expand
+when needed.
+
+Bundled **Iosevka Slab Extended Semibold and Bold** provides serif monospace
+type throughout. Evergreen and Urbane palettes combine black/white contrast
+with saturated green, violet, and amber accents. Dark and Light modes are
+remembered between launches. See [Interface design](DESIGN.md) for color roles
+and contrast checks. Measurement displays retain recorded numeric precision,
+and incomplete USB downloads remain clearly identified.
 
 ## Run and build
 
@@ -41,19 +49,68 @@ MSVC C++ build tools and Windows SDK are needed to link the native application.
 ```text
 cargo run --locked
 cargo test --locked
+cargo fmt -- --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
 The built Windows program is `target/release/green-suite.exe`. Connect the
 Wrist Reporter with a **mini-USB data cable**. The Silicon Labs CP210x driver
 must expose a serial port. Select the port, click **Connect**, then
-**Download**. Downloads do not erase instrument memory or change firmware.
+**Download records**. Downloads do not erase instrument memory or change firmware.
 
 Close other software using that serial port before connecting. A port may
 change when an instrument is connected through a different USB socket.
 
+### USB recovery
+
+Stored downloads and live reception share the same 230400-baud, 8N1 setup,
+with flow control, DTR and RTS disabled. Connection failures distinguish a
+missing port, denied exclusive access, and a Windows device/driver failure.
+The diagnostic handle check sends no Reporter protocol commands.
+
+- **Port absent / Win32 2 or 1167:** refresh the port list and check the device
+  in Windows Device Manager. A previously assigned COM number can be stale.
+- **Access denied / Win32 5 or 32:** check applications holding the port and
+  account access. This message does not prove another program owns the port.
+- **Device I/O failure / Win32 31 or 1117:** inspect USB status, driver, cable
+  and device power rather than repeatedly attempting a record download.
+- **Device Descriptor Request Failed / Windows Code 43:** Windows has not
+  successfully identified the USB device, so the CP210x serial driver cannot
+  yet provide a usable port. Reconnect with a known-good data cable and USB
+  port. Updating the serial driver alone cannot guarantee recovery.
+
+Use a signed CP210x VCP package compatible with the Windows version from
+[Silicon Labs](https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers).
+Green Suite does not silently install drivers, restart USB devices, reset hubs,
+or change Windows security settings.
+
+Idempotent device metadata queries retry at most three times on I/O timeouts,
+clearing stale input between attempts. Invalid responses and non-timeout
+failures stop immediately. Group/record cursor commands are attempted once;
+they are never automatically replayed. This avoids silently skipping records.
+
+Serial setup clears a lingering transmit break and waits 500 milliseconds before
+the first metadata query. `--probe COM5 --out ".\diagnostics"` saves a new raw
+diagnostic capture, including failures; it never replaces an existing capture.
+Successful USB enumeration alone does not prove the instrument will answer queries.
+
 `cargo build --locked` produces `target/debug/green-suite.exe`. This profile
 uses modest optimization, omits debug symbols, and disables incremental output.
+
+### Updating a local installation
+
+Updates are manual; the application does not download or install its own updates.
+Run the checks above, build the chosen profile, and preserve a rollback copy of
+the installed executable before replacing it. Close the application before
+replacing an executable that is in use. Keep launch shortcuts pointed at the
+chosen installed executable and verify it matches the completed build.
+
+An executable installed in the repository root uses the repository's `workspace`
+directory, regardless of its filename. Keep that directory when updating to
+preserve projects, appearance preferences, and private captures. Build output
+and installed executables are excluded from Git; source commits and executable
+deployment are separate steps.
 
 ## Data and project files
 
@@ -90,22 +147,53 @@ group enumeration, and record retrieval. Record fields are decoded in Rust;
 Evergreen's installed executable is not loaded or distributed.
 
 Initial compatibility is WR-401 **Rev. 1.04Y6**. Other revisions are unverified.
-Only the read/query commands needed by the explorer are implemented. Stateful
-record reads are not blindly retried, because doing so could skip records.
+Stored-record retrieval uses read/query commands. Stateful record reads are not
+blindly retried, because doing so could skip records.
 An interrupted transfer retains partial data and reports incompleteness.
 Unknown fields and unverified checksums are surfaced in warnings, and raw
 packets are preserved for investigation. No wireless support is implemented.
 
-The current pipeline is stored memory → USB queries → Rust decoding → raw
-capture and normalized measurements → reading explorer and drawing attachments.
-The GUI does not currently show live sensor readings. Evergreen documents a
-separate USB real-time logging capability for the WR-401 in its
+The stored-data pipeline is memory → USB queries → Rust decoding → raw
+capture and normalized measurements → Readings and drawing attachments.
+Live reception uses a separate serial session, described below. Evergreen
+documents USB real-time logging in its
 [User Guide, page 19](https://img1.wsimg.com/blobby/go/a3cb8563-340e-41b0-af11-2e1965d0fece/downloads/Wrist%20Reporter%20User%20Guide.pdf?ver=1733769186267#page=19).
-Live support requires verification of the stream handshake, packet format,
-timing, and stop behavior with an active sensor. The planned GUI path is a
-dedicated serial worker feeding timestamped readings, stale/disconnected
-indicators, bounded trends, and explicit capture into the project. Stored-record
-decoding alone does not establish live-stream compatibility.
+
+## Live pressure reception
+
+Turn the pressure modules off before identifying the Reporter. If it was in a
+previous live session, restart it while the modules remain off. In Green Suite,
+select the USB port and click **Connect**. If identification times out, turn the
+modules off, restart the Reporter, and retry **Connect** before turning the
+modules on.
+
+Once the Reporter is identified, turn the pressure modules on, pair them if
+needed, and wait for their normal readings on the Reporter. Open **Live**
+and click **Start live reception**. The live session fixes the linked module set,
+enters the Reporter's RTU mode, and selects its history screen. USB downloads and
+port changes are unavailable while reception owns the port.
+
+The GUI displays validated readings and their original numeric text, including
+negative pressure and trailing decimal places. The wire unit is preserved
+(for example, `inW`). A channel becomes stale after 15 seconds without a valid
+update. Update cadence comes from the instrument; the application does not
+manufacture samples or promise a fixed interval. Each trend retains at most
+180 samples. **Capture reading** saves the current valid value; optional
+attachment links it to the selected drawing point. Capturing does not write a
+record back to the instrument.
+
+**Stop receiving closes the PC port; it does not restore the Reporter mode.**
+For normal use after a session, turn the sensors off, turn the Reporter off and
+back on, then turn the sensors on and let them link. This follows the vendor's
+[recovery procedure, page 20](https://img1.wsimg.com/blobby/go/a3cb8563-340e-41b0-af11-2e1965d0fece/downloads/Wrist%20Reporter%20User%20Guide.pdf?ver=1733769186267#page=20).
+No undocumented unlock, reset, erase, calibration, or firmware command is sent.
+
+Live capture files are private `workspace/live-captures/*.raw.ndjson` files.
+Each session uses a new file and stops at a 32 MiB limit. Rejected frames remain
+in the raw capture but cannot update a displayed or captured measurement.
+Device timestamps remain instrument-local; PC receipt times are stored
+separately. If the display queue falls behind, the raw log retains the received
+frames and the GUI reports dropped display updates.
 
 ## Traverse interpretation
 
@@ -124,12 +212,27 @@ The same Rust binary supports non-destructive diagnostics and downloads:
 
 ```text
 green-suite.exe --probe COM5
+green-suite.exe --probe COM5 --out ".\diagnostics"
 green-suite.exe --download COM5 --out ".\downloads"
 green-suite.exe --project ".\survey.green-suite.json"
 green-suite.exe --pdf-check ".\drawing.pdf"
 green-suite.exe --demo
 green-suite.exe --demo --view traverse --screenshot ".\preview.png"
+green-suite.exe --preview-ui ".\preview.png" --demo --view live --theme dark --palette evergreen --size 1000x600
+green-suite.exe --view live
+green-suite.exe --capture-live COM5 --seconds 30 --out ".\live-captures"
 ```
+
+`--capture-live` performs the same mode-changing live session for a bounded
+duration (1–3600 seconds), preserves raw frames, and reports its latest validated
+sample. It requires the same instrument recovery procedure as the GUI.
+
+`--preview-ui` renders the actual interface to a PNG using the CPU, without
+opening a window, using a GPU, accessing USB, or reading the runtime workspace.
+`--demo` uses explicitly labeled example data. Choose `--theme light|dark`,
+`--palette evergreen|urbane`, and `--size WIDTHxHEIGHT`; omit `--demo` for an
+empty workspace preview. The separate `--screenshot` option opens a native
+window before capturing it.
 
 The optional `tools/export-readings.pl` converts a saved project to normalized
 Green Suite CSV version 1 using only Perl core modules:
